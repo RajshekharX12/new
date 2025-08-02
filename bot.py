@@ -1,4 +1,3 @@
-# bot.py
 import os
 import html
 import logging
@@ -34,7 +33,7 @@ dp = Dispatcher()
 # ─── PLUGINS ──────────────────────────────────────────────────
 import fragment_url   # inline 888 → fragment.com
 import speed          # /speed VPS speedtest
-import update         # /update auto-pull & summary
+import update         # /update: auto-pull, summary & hot-restart
 import review         # /review code quality + /help
 
 # ─── SAFONEAPI CLIENT ──────────────────────────────────────────
@@ -46,7 +45,7 @@ async def start(message: types.Message):
     await message.answer(
         "👋 Welcome! I can help you with:\n"
         "• /speed  — run a VPS speed test 🌐\n"
-        "• /update — pull latest code & report changes 🔄\n"
+        "• /update — pull latest code, report changes & restart 🔄\n"
         "• /review — code quality review 📋\n"
         "• /help   — list commands ❓\n\n"
         "✉️ Send any other text and I'll reply via ChatGPT ✨"
