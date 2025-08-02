@@ -36,8 +36,14 @@ async def forward_to_safone(message: types.Message):
         return
 
     try:
-        # Direct async call to SafoneAPI
-        reply = await api.chat(text)
+        # Use the gemini endpoint for conversational AI
+        reply = await api.gemini(text)
+    except AttributeError:
+        # If you still get this, list out available methods:
+        methods = [m for m in dir(api) if callable(getattr(api, m)) and not m.startswith("_")]
+        await message.reply("⚠️ This wrapper has no `.gemini()`. Available methods are:\n" +
+                            ", ".join(methods))
+        return
     except Exception as e:
         logger.exception("SafoneAPI error")
         await message.reply(f"❌ SafoneAPI Error:\n{e}")
