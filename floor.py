@@ -7,13 +7,20 @@ Handler for /888:
   • Fetches sale listings and reports the first +888 number’s TON & USD price
 """
 
+import os
 import sys
 import logging
 from aiogram.filters import Command
 from aiogram.types import Message
 
-# import the vendored client
-from vendor.userapi import FragmentClient
+# 1) Make sure Python can import the vendored code
+ROOT   = os.path.dirname(__file__)
+VENDOR = os.path.join(ROOT, "vendor", "userapi")
+if VENDOR not in sys.path:
+    sys.path.insert(0, VENDOR)
+
+# 2) Now import the real FragmentClient
+from userapi import FragmentClient
 
 # grab dispatcher & bot from main
 _main = sys.modules["__main__"]
@@ -26,15 +33,14 @@ async def floor_handler(message: Message):
     status = await message.reply("🔍 Fetching current floor price…")
     try:
         client = FragmentClient()
-        # fetch sale listings
-        data = await client.get_numbers(filter="sale")
+        data   = await client.get_numbers(filter="sale")
         if not data or not getattr(data, "nodes", None):
             raise ValueError("No sale listings found")
 
-        first = data.nodes[0]
-        number = first.number             # e.g. "88804686913"
-        ton    = first.assetPrice.value   # e.g. 720
-        usd    = first.fiatPrice          # e.g. 2602
+        first  = data.nodes[0]
+        number = first.number
+        ton    = first.assetPrice.value
+        usd    = first.fiatPrice
 
         await status.delete()
         await message.answer(
