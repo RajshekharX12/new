@@ -1,64 +1,81 @@
 import os
+import html
 import logging
-import asyncio
-import json
-from dotenv import load_dotenv
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.enums import ParseMode
+from aiogram.filters import CommandStart
 from SafoneAPI import SafoneAPI
+from dotenv import load_dotenv
 
-# Load your Telegram token
+# ─── LOAD ENV VARIABLES ────────────────────────────────────────
 load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise RuntimeError("Missing BOT_TOKEN in .env")
+API_TOKEN = os.getenv("BOT_TOKEN")
+if not API_TOKEN:
+    raise RuntimeError("BOT_TOKEN is not set in .env")
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# ─── LOGGING SETUP ─────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
 
-# Init bot + dispatcher + SafoneAPI client
-bot = Bot(token=BOT_TOKEN)
+# ─── BOT INITIALIZATION ────────────────────────────────────────
+bot = Bot(token=API_TOKEN, parse_mode=ParseMode.HTML)
 dp = Dispatcher()
 api = SafoneAPI()
 
-@dp.message(Command(commands=["start", "help"]))
-async def cmd_start(message: types.Message):
-    await message.reply("👋 Hi! Send me any text and I'll reply using SafoneAPI.")
-
-@dp.message()
-async def forward_to_safone(message: types.Message):
-    user_text = message.text.strip()
-    if not user_text:
-        return
-
+# ─── HANDLER: "bhai" COMMAND ───────────────────────────────────
+@dp.message(F.text.startswith("bhai"))
+async def chatgpt_handler(message: types.Message):
     try:
-        # call the async chatbot endpoint
-        res = await api.chatbot(user_text)
-        # extract the actual reply text
-        if isinstance(res, dict):
-            content = res.get("bot") or res.get("reply") or res.get("results") or json.dumps(res)
-        elif hasattr(res, "bot"):
-            content = res.bot
-        elif hasattr(res, "reply"):
-            content = res.reply
-        elif hasattr(res, "results"):
-            content = res.results
-        else:
-            content = str(res)
+        # Extract the query
+        parts = message.text.split(maxsplit=1)
+        query = parts[1] if len(parts) > 1 else None
+        if not query and message.reply_to_message:
+            query = message.reply_to_message.text
+        if not query:
+            return await message.reply("❗ Bhai, mujhe question toh de...")
+
+        # Input length check
+        if len(query) > 1000:
+            return await message.reply("⚠️ Bhai, question zyada lamba ho gaya. Thoda chhota puchho.")
+
+        # Send "typing" message
+        status = await message.reply("🧠 Generating answer...")
+
+        # Prepend prompt instructions
+        prompt_intro = (
+            "You are user's friend. Reply in friendly Hindi with emojis, "
+            "using 'bhai' style words like 'Arey bhai', 'Nahi bhai', etc.\n\n"
+        )
+        full_prompt = prompt_intro + query
+
+        # Get response from SafoneAPI
+        response = await api.chatgpt(full_prompt)
+        if not response or not response.message:
+            raise ValueError("Invalid response from API")
+
+        # Format and send final response
+        safe_answer = html.escape(response.message)
+        formatted = (
+            f"<b>Query:</b>\n~ <i>{html.escape(query)}</i>\n\n"
+            f"<b>ChatGPT:</b>\n~ <i>{safe_answer}</i>"
+        )
+        await status.edit_text(formatted)
+
     except Exception as e:
-        logger.exception("SafoneAPI error")
-        await message.reply(f"❌ SafoneAPI Error:\n{e}")
-        return
+        logger.exception("Unexpected error")
+        await message.reply("🚨 Error: Safone API failed ya response nahi aaya.")
 
-    # ensure it's a string
-    if not isinstance(content, str):
-        content = json.dumps(content)
+# ─── /start COMMAND ────────────────────────────────────────────
+@dp.message(CommandStart())
+async def start(message: types.Message):
+    await message.answer(
+        "👋 Bhai, mujhe 'bhai &lt;sawal&gt;' likh kar puchho. Main Hindi mein dost jaisa reply dunga!"
+    )
 
-    await message.answer(content)
-
-async def main():
-    await dp.start_polling(bot, skip_updates=True)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+# ─── MAIN ENTRY POINT ──────────────────────────────────────────
+if name == "__main__":
+    logger.info("🚀 Bot is starting...")
+    dp.run_polling(bot)
