@@ -1,0 +1,6 @@
+your-bot-repo/
+├── .gitignore
+├── .env.example
+├── README.md
+├── requirements.txt
+└── bot.py
