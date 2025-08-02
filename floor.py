@@ -3,19 +3,23 @@
 floor.py
 
 Handler for /888:
-  • Scrapes fragment.com/numbers?filter=sale with BeautifulSoup
+  • Uses Selenium headless Chrome to load fragment.com
   • Finds the first '/number/888…/code' link
-  • Follows it, parses TON and USD prices
-  • Replies with "+888…: <TON> TON (~$<USD>)"
+  • Navigates there and extracts TON price & USD equivalent
 """
 
 import sys
 import re
 import logging
-import requests
-from bs4 import BeautifulSoup
+import asyncio
+
 from aiogram.filters import Command
 from aiogram.types import Message
+
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
 
 # grab dispatcher & bot from main
 _main = sys.modules["__main__"]
@@ -24,54 +28,52 @@ bot   = _main.bot
 
 logger = logging.getLogger(__name__)
 
-# session with real browser UA
-session = requests.Session()
-session.headers.update({
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/115.0.0.0 Safari/537.36"
-    )
-})
+def scrape_floor():
+    # setup headless Chrome
+    opts = Options()
+    opts.add_argument("--headless")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=opts)
+
+    try:
+        # 1) Load the sale listings page
+        driver.get("https://fragment.com/numbers?filter=sale")
+        # 2) Find first +888 link
+        elems = driver.find_elements("xpath", "//a[starts-with(@href,'/number/888') and contains(@href,'/code')]")
+        if not elems:
+            raise RuntimeError("No +888 listings found")
+        href = elems[0].get_attribute("href")
+        number = "+" + href.rstrip("/code").split("/")[-1]
+
+        # 3) Navigate to detail page
+        driver.get(href)
+        html = driver.page_source
+
+        # 4) Extract TON and USD via regex
+        ton_m = re.search(r"([\d,]+)\s*TON", html)
+        usd_m = re.search(r"~\s*\$([\d,.,]+)", html)
+        if not ton_m or not usd_m:
+            raise RuntimeError("Price info not found")
+        ton = ton_m.group(1).replace(",", "")
+        usd = usd_m.group(1).replace(",", "")
+
+        return number, ton, usd
+    finally:
+        driver.quit()
 
 @dp.message(Command(commands=["888"]))
 async def floor_handler(message: Message):
     status = await message.reply("🔍 Fetching current floor price…")
     try:
-        # 1) GET the sale listings page
-        list_url = "https://fragment.com/numbers?filter=sale"
-        r = session.get(list_url, timeout=10)
-        r.raise_for_status()
-        soup = BeautifulSoup(r.text, "html.parser")
-
-        # 2) Find the first +888 link
-        link = None
-        for a in soup.find_all("a", href=True):
-            if re.match(r"^/number/888\d+/code$", a["href"]):
-                link = a["href"]
-                break
-        if not link:
-            raise ValueError("No +888 listings found on sale page")
-
-        number = "+" + link.split("/")[2]
-
-        # 3) GET the detail page
-        detail = session.get(f"https://fragment.com{link}", timeout=10)
-        detail.raise_for_status()
-        dsoup = BeautifulSoup(detail.text, "html.parser")
-
-        # 4) Parse TON and USD
-        ton_text = dsoup.find(text=re.compile(r"\d[\d,]*\s*TON"))
-        usd_text = dsoup.find(text=re.compile(r"~\s*\$\d[\d,]*"))
-        if not ton_text or not usd_text:
-            raise ValueError("Could not locate price info")
-        ton = re.search(r"([\d,]+)\s*TON", ton_text).group(1).replace(",", "")
-        usd = re.search(r"\$(\d[\d,]*)", usd_text).group(1).replace(",", "")
-
-        # 5) Reply
+        loop = asyncio.get_event_loop()
+        number, ton, usd = await loop.run_in_executor(None, scrape_floor)
         await status.delete()
-        await message.answer(f"💰 {number}: {ton} TON (~${usd})")
-
+        await message.answer(
+            f"💰 Current Floor Number: {number}\n\n"
+            f"• Price: {ton} TON (~${usd})"
+        )
     except Exception as e:
         logger.exception("floor error")
         await status.edit_text(f"❌ Failed to fetch floor: {e}")
