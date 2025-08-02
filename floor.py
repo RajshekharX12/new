@@ -19,6 +19,7 @@ from aiogram.types import Message
 # Selenium imports
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -40,11 +41,11 @@ def scrape_floor():
     options.add_argument("--window-size=1920,1080")
     options.add_argument("--log-level=3")
 
-    driver = webdriver.Chrome(
-        ChromeDriverManager().install(),
-        options=options
-    )
+    # Only keyword args: service= and options=
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=options)
     wait = WebDriverWait(driver, 15)
+
     try:
         url = (
             "https://marketapp.ws/collection/"
@@ -60,12 +61,11 @@ def scrape_floor():
 
         # 2) Pull out the three lines: label, TON, USD
         lines = floor_container.text.strip().split("\n")
-        # lines[0] == "Floor", lines[1] == "707 TON", lines[2] == "~$2,534"
         if len(lines) < 3:
             raise RuntimeError("Unexpected layout: floor container text lines < 3")
 
-        ton_text = lines[1].split()[0]     # "707"
-        usd_text = lines[2].lstrip("~$")   # "2,534"
+        ton_text = lines[1].split()[0]     # e.g. "707"
+        usd_text = lines[2].lstrip("~$")   # e.g. "2534"
 
         return ton_text, usd_text
 
