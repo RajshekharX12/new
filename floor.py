@@ -3,27 +3,28 @@
 floor.py
 
 Handler for /888:
-  • Uses Next.js data endpoint to fetch numbers JSON
-  • Finds the first +888 collectible
-  • Reports its TON price and USD equivalent
+  • Scrapes fragment.com/numbers?filter=sale with BeautifulSoup
+  • Finds the first '/number/888…/code' link
+  • Follows it, parses TON and USD prices
+  • Replies with "+888…: <TON> TON (~$<USD>)"
 """
 
 import sys
-import json
+import re
 import logging
 import requests
-import re
+from bs4 import BeautifulSoup
 from aiogram.filters import Command
 from aiogram.types import Message
 
-# Grab dispatcher & bot from main
+# grab dispatcher & bot from main
 _main = sys.modules["__main__"]
 dp    = _main.dp
 bot   = _main.bot
 
 logger = logging.getLogger(__name__)
 
-# Browser‐like session
+# session with real browser UA
 session = requests.Session()
 session.headers.update({
     "User-Agent": (
@@ -33,79 +34,43 @@ session.headers.update({
     )
 })
 
-def _find_listings(obj):
-    """Recursively search for a list of dicts each having a 'number' key."""
-    if isinstance(obj, dict):
-        for v in obj.values():
-            found = _find_listings(v)
-            if found:
-                return found
-    elif isinstance(obj, list) and obj and isinstance(obj[0], dict) and "number" in obj[0]:
-        return obj
-    elif isinstance(obj, list):
-        for item in obj:
-            found = _find_listings(item)
-            if found:
-                return found
-    return None
-
 @dp.message(Command(commands=["888"]))
 async def floor_handler(message: Message):
     status = await message.reply("🔍 Fetching current floor price…")
     try:
-        # 1) GET main page to extract buildId
-        page_url = "https://fragment.com/numbers?filter=sale"
-        r = session.get(page_url, timeout=10)
+        # 1) GET the sale listings page
+        list_url = "https://fragment.com/numbers?filter=sale"
+        r = session.get(list_url, timeout=10)
         r.raise_for_status()
-        html = r.text
+        soup = BeautifulSoup(r.text, "html.parser")
 
-        # 2) Extract __NEXT_DATA__ JSON and its buildId
-        m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
-        if not m:
-            raise ValueError("Can't find Next.js data on page")
-        next_data = json.loads(m.group(1))
-        build_id = next_data.get("buildId")
-        if not build_id:
-            raise ValueError("No buildId in Next.js data")
-
-        # 3) Fetch the JSON endpoint for this page
-        json_url = f"https://fragment.com/_next/data/{build_id}/numbers.json?filter=sale"
-        jr = session.get(json_url, timeout=10)
-        jr.raise_for_status()
-        data = jr.json()
-
-        # 4) Locate the listings array
-        listings = _find_listings(data)
-        if not listings:
-            raise ValueError("No listings found in page data")
-
-        # 5) Find the first +888 entry
-        first = next((x for x in listings if str(x.get("number","")).startswith("888")), None)
-        if not first:
-            raise ValueError("No +888 collectible in listings")
-
-        number = first["number"]
-        # Extract TON price from various possible fields
-        ton = None
-        for key in ("assetPrice", "tokenPrice", "price"):
-            val = first.get(key)
-            if isinstance(val, dict) and "value" in val:
-                ton = val["value"]
-            elif isinstance(val, (int, float, str)):
-                ton = val
-            if ton:
+        # 2) Find the first +888 link
+        link = None
+        for a in soup.find_all("a", href=True):
+            if re.match(r"^/number/888\d+/code$", a["href"]):
+                link = a["href"]
                 break
+        if not link:
+            raise ValueError("No +888 listings found on sale page")
 
-        usd = first.get("fiatPrice") or first.get("usdPrice") or first.get("priceUsd")
-        if ton is None or usd is None:
-            raise ValueError("Incomplete price info in listing")
+        number = "+" + link.split("/")[2]
 
-        # 6) Send the result
+        # 3) GET the detail page
+        detail = session.get(f"https://fragment.com{link}", timeout=10)
+        detail.raise_for_status()
+        dsoup = BeautifulSoup(detail.text, "html.parser")
+
+        # 4) Parse TON and USD
+        ton_text = dsoup.find(text=re.compile(r"\d[\d,]*\s*TON"))
+        usd_text = dsoup.find(text=re.compile(r"~\s*\$\d[\d,]*"))
+        if not ton_text or not usd_text:
+            raise ValueError("Could not locate price info")
+        ton = re.search(r"([\d,]+)\s*TON", ton_text).group(1).replace(",", "")
+        usd = re.search(r"\$(\d[\d,]*)", usd_text).group(1).replace(",", "")
+
+        # 5) Reply
         await status.delete()
-        await message.answer(
-            f"💰 Current Floor Number: +{number}\n\n"
-            f"• Price: {ton} TON (~${usd})"
-        )
+        await message.answer(f"💰 {number}: {ton} TON (~${usd})")
 
     except Exception as e:
         logger.exception("floor error")
