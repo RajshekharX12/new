@@ -1,3 +1,4 @@
+# bot.py
 import os
 import html
 import logging
@@ -5,7 +6,6 @@ from dotenv import load_dotenv
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ParseMode
-from aiogram.filters import CommandStart
 from aiogram.client.default import DefaultBotProperties
 
 from SafoneAPI import SafoneAPI
@@ -38,18 +38,6 @@ import review         # /review code quality + /help
 
 # ─── SAFONEAPI CLIENT ──────────────────────────────────────────
 api = SafoneAPI()
-
-# ─── /start HANDLER ────────────────────────────────────────────
-@dp.message(CommandStart())
-async def start(message: types.Message):
-    await message.answer(
-        "👋 Welcome! I can help you with:\n"
-        "• /speed  — run a VPS speed test 🌐\n"
-        "• /update — pull latest code, report changes & restart 🔄\n"
-        "• /review — code quality review 📋\n"
-        "• /help   — list commands ❓\n\n"
-        "✉️ Send any other text and I'll reply via ChatGPT ✨"
-    )
 
 # ─── CHATGPT FALLBACK ──────────────────────────────────────────
 @dp.message(F.text & ~F.text.startswith("/"))
