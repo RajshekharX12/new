@@ -3,16 +3,16 @@
 floor.py
 
 Handler for /888:
-  1) Hits the JSON API for sale listings
-  2) Falls back to parsing the SSR HTML if JSON fails
-  3) Reports the first +888 number’s TON price and USD equivalent
+  • Scrapes fragment.com/numbers?filter=sale
+  • Finds the first +888 listing link
+  • Fetches its detail page
+  • Extracts and reports TON price and USD equivalent
 """
 
 import sys
+import re
 import logging
 import requests
-import re
-import json
 from aiogram.filters import Command
 from aiogram.types import Message
 
@@ -23,6 +23,7 @@ bot   = _main.bot
 
 logger = logging.getLogger(__name__)
 
+# set up a session with a browser‐like UA
 session = requests.Session()
 session.headers.update({
     "User-Agent": (
@@ -36,57 +37,36 @@ session.headers.update({
 async def floor_handler(message: Message):
     status = await message.reply("🔍 Fetching current floor price…")
     try:
-        # --- 1) Try the JSON API endpoint ---
-        api_url = "https://fragment.com/api/numbers?filter=sale"
-        resp = session.get(api_url, timeout=10)
-        if resp.ok and resp.headers.get("Content-Type", "").startswith("application/json"):
-            data = resp.json()
-            # Expecting a list of listings
-            if isinstance(data, list) and data:
-                first = data[0]
-                number = first.get("number")
-                ton    = first.get("assetPrice", {}).get("value") or first.get("tokenPrice") or first.get("price")
-                usd    = first.get("fiatPrice") or first.get("usdPrice")
-                if number and ton and usd:
-                    await status.delete()
-                    return await message.answer(
-                        f"💰 Current Floor Number: +{number}\n\n"
-                        f"• Price: {ton} TON (~${usd})"
-                    )
-        # --- 2) Fallback to HTML/SSR parse ---
-        page_url = "https://fragment.com/numbers?filter=sale"
-        page = session.get(page_url, timeout=10)
-        page.raise_for_status()
-        html_text = page.text
-        # look for __NEXT_DATA__
-        m = re.search(r'<script[^>]+id="__NEXT_DATA__"[^>]*>(\{.*?\})</script>', html_text, re.DOTALL)
+        # 1) Fetch the listings page
+        list_url = "https://fragment.com/numbers?filter=sale"
+        r = session.get(list_url, timeout=10)
+        r.raise_for_status()
+        html = r.text
+
+        # 2) Extract the first +888 detail path
+        m = re.search(r'href="(/number/888[0-9]+/code)"', html)
         if not m:
-            raise ValueError("No SSR data found")
-        data = json.loads(m.group(1))
-        # recursive search for listing nodes
-        def find_list(obj):
-            if isinstance(obj, dict):
-                # look for an array named "nodes" containing dicts with "number"
-                nodes = obj.get("nodes")
-                if isinstance(nodes, list) and nodes and isinstance(nodes[0], dict) and "number" in nodes[0]:
-                    return nodes
-                for v in obj.values():
-                    res = find_list(v)
-                    if res: return res
-            elif isinstance(obj, list):
-                for item in obj:
-                    res = find_list(item)
-                    if res: return res
-            return None
-        nodes = find_list(data)
-        if not nodes:
-            raise ValueError("No listings in SSR data")
-        first = nodes[0]
-        number = first.get("number")
-        ton    = (first.get("assetPrice") or {}).get("value") or first.get("tokenPrice") or first.get("price")
-        usd    = first.get("fiatPrice") or first.get("usdPrice")
-        if not (number and ton and usd):
-            raise ValueError("Incomplete price data in SSR")
+            raise ValueError("No +888 listings found on the sale page")
+        path   = m.group(1)                # e.g. /number/88804686913/code
+        number = path.split("/")[2]        # e.g. 88804686913
+
+        # 3) Fetch the detail page
+        detail_url = f"https://fragment.com{path}"
+        rd = session.get(detail_url, timeout=10)
+        rd.raise_for_status()
+        dhtml = rd.text
+
+        # 4) Parse TON price (e.g. "720 TON")
+        m_ton = re.search(r'([\d,]+)\s*TON\b', dhtml)
+        if not m_ton:
+            raise ValueError("Couldn't parse TON price")
+        ton = m_ton.group(1).replace(",", "")
+
+        # 5) Parse USD equivalent (e.g. "~ $2,602")
+        m_usd = re.search(r'~\s*\$([\d,]+)', dhtml)
+        usd = m_usd.group(1).replace(",", "") if m_usd else "N/A"
+
+        # 6) Report back
         await status.delete()
         await message.answer(
             f"💰 Current Floor Number: +{number}\n\n"
