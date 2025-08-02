@@ -26,7 +26,7 @@ api = SafoneAPI()
 @dp.message(Command(commands=["start", "help"]))
 async def cmd_start(message: types.Message):
     await message.reply(
-        "👋 Hi there! Send me any text and I'll reply using SafoneAPI."
+        "👋 Hi there! Send me any text and I'll relay it through SafoneAPI."
     )
 
 @dp.message()
@@ -36,15 +36,12 @@ async def forward_to_safone(message: types.Message):
         return
 
     try:
-        # Use the GPT endpoint
-        reply = await api.gpt(text)
+        # Use the generic chatbot endpoint
+        reply = await api.chatbot(text)
     except AttributeError:
-        # If .gpt() still doesn't exist, list available methods:
+        # Fallback: show you exactly which methods exist
         methods = [m for m in dir(api) if callable(getattr(api, m)) and not m.startswith("_")]
-        await message.reply(
-            "⚠️ `.gpt()` not found. Available methods:\n" +
-            ", ".join(methods)
-        )
+        await message.reply("⚠️ `.chatbot()` not found. Available methods:\n" + ", ".join(methods))
         return
     except Exception as e:
         logger.exception("SafoneAPI error")
@@ -54,6 +51,7 @@ async def forward_to_safone(message: types.Message):
     await message.answer(reply)
 
 async def main():
+    # Start long-polling
     await dp.start_polling(bot, skip_updates=True)
 
 if __name__ == "__main__":
