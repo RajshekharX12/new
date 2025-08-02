@@ -1,11 +1,15 @@
 import os
 import html
 import logging
+from dotenv import load_dotenv
+
+import asyncio
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart
+from aiogram.client.default import DefaultBotProperties
+
 from SafoneAPI import SafoneAPI
-from dotenv import load_dotenv
 
 # ─── LOAD ENV VARIABLES ────────────────────────────────────────
 load_dotenv()
@@ -21,15 +25,18 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ─── BOT INITIALIZATION ────────────────────────────────────────
-bot = Bot(token=API_TOKEN, parse_mode=ParseMode.HTML)
-dp = Dispatcher()
+bot = Bot(
+    token=API_TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+)
+dp = Dispatcher(bot)
 api = SafoneAPI()
 
-# ─── HANDLER: "bhai" COMMAND ───────────────────────────────────
+# ─── HANDLER: "bhai" TRIGGER ───────────────────────────────────
 @dp.message(F.text.startswith("bhai"))
 async def chatgpt_handler(message: types.Message):
     try:
-        # Extract the query
+        # extract query after "bhai"
         parts = message.text.split(maxsplit=1)
         query = parts[1] if len(parts) > 1 else None
         if not query and message.reply_to_message:
@@ -37,26 +44,22 @@ async def chatgpt_handler(message: types.Message):
         if not query:
             return await message.reply("❗ Bhai, mujhe question toh de...")
 
-        # Input length check
         if len(query) > 1000:
             return await message.reply("⚠️ Bhai, question zyada lamba ho gaya. Thoda chhota puchho.")
 
-        # Send "typing" message
         status = await message.reply("🧠 Generating answer...")
 
-        # Prepend prompt instructions
         prompt_intro = (
             "You are user's friend. Reply in friendly Hindi with emojis, "
             "using 'bhai' style words like 'Arey bhai', 'Nahi bhai', etc.\n\n"
         )
         full_prompt = prompt_intro + query
 
-        # Get response from SafoneAPI
+        # fetch from SafoneAPI
         response = await api.chatgpt(full_prompt)
-        if not response or not response.message:
+        if not response or not getattr(response, "message", None):
             raise ValueError("Invalid response from API")
 
-        # Format and send final response
         safe_answer = html.escape(response.message)
         formatted = (
             f"<b>Query:</b>\n~ <i>{html.escape(query)}</i>\n\n"
@@ -64,7 +67,7 @@ async def chatgpt_handler(message: types.Message):
         )
         await status.edit_text(formatted)
 
-    except Exception as e:
+    except Exception:
         logger.exception("Unexpected error")
         await message.reply("🚨 Error: Safone API failed ya response nahi aaya.")
 
@@ -72,10 +75,10 @@ async def chatgpt_handler(message: types.Message):
 @dp.message(CommandStart())
 async def start(message: types.Message):
     await message.answer(
-        "👋 Bhai, mujhe 'bhai &lt;sawal&gt;' likh kar puchho. Main Hindi mein dost jaisa reply dunga!"
+        "👋 Bhai, mujhe 'bhai <sawal>' likh kar puchho. Main Hindi mein dost jaisa reply dunga!"
     )
 
-# ─── MAIN ENTRY POINT ──────────────────────────────────────────
-if name == "__main__":
+# ─── MAIN LOOP ────────────────────────────────────────────────
+if __name__ == "__main__":
     logger.info("🚀 Bot is starting...")
     dp.run_polling(bot)
