@@ -30,62 +30,42 @@ bot = Bot(
 )
 dp = Dispatcher()
 
-# ─── INLINE FRAGMENT HANDLER ──────────────────────────────────
-# this will register the @dp.inline_query handler from fragment_url.py
-import fragment_url
+# ─── PLUGINS ──────────────────────────────────────────────────
+# Needs to come *after* dp is created
+import fragment_url   # inline 888 → fragment.com handler
+import speed          # /speed VPS speedtest handler
 
-# ─── SAFONE CLIENT ─────────────────────────────────────────────
+# ─── SAFONEAPI CLIENT ──────────────────────────────────────────
 api = SafoneAPI()
 
 # ─── /start HANDLER ────────────────────────────────────────────
 @dp.message(CommandStart())
 async def start(message: types.Message):
-    # Escape <sawal> so HTML parser won’t choke
     await message.answer(
-        "👋 Bhai, mujhe 'bhai &lt;sawal&gt;' likh kar puchho. Main Hindi mein dost jaisa reply dunga!"
+        "👋 Welcome! Send me any text and I'll reply via SafoneAPI.\n"
+        "Use /speed to run a VPS speed test."
     )
 
-# ─── “bhai” HANDLER ─────────────────────────────────────────────
-@dp.message(F.text.startswith("bhai"))
+# ─── ChatGPT FALLBACK HANDLER ───────────────────────────────────
+# Catches *any* text message that isn't a command
+@dp.message(F.text & ~F.text.startswith("/"))
 async def chatgpt_handler(message: types.Message):
+    text = message.text.strip()
+    if not text:
+        return
+
     try:
-        parts = message.text.split(maxsplit=1)
-        query = parts[1] if len(parts) > 1 else None
-        if not query and message.reply_to_message:
-            query = message.reply_to_message.text
-        if not query:
-            return await message.reply("❗ Bhai, mujhe question toh de...")
-
-        if len(query) > 1000:
-            return await message.reply("⚠️ Bhai, question zyada lamba ho gaya. Thoda chhota puchho.")
-
-        status = await message.reply("🧠 Generating answer...")
-
-        prompt_intro = (
-            "You are user's friend. Reply in friendly Hindi with emojis, "
-            "using 'bhai' style words like 'Arey bhai', 'Nahi bhai', etc.\n\n"
-        )
-        full_prompt = prompt_intro + query
-
-        response = await api.chatgpt(full_prompt)
+        response = await api.chatgpt(text)
         answer = getattr(response, "message", None)
         if not answer:
             raise ValueError("Invalid response from API")
-
-        safe_answer = html.escape(answer)
-        formatted = (
-            f"<b>Query:</b>\n"
-            f"~ <i>{html.escape(query)}</i>\n\n"
-            f"<b>ChatGPT:</b>\n"
-            f"~ <i>{safe_answer}</i>"
-        )
-        await status.edit_text(formatted)
-
+        safe = html.escape(answer)
+        await message.answer(safe)
     except Exception:
-        logger.exception("Unexpected error")
-        await message.reply("🚨 Error: Safone API failed ya response nahi aaya.")
+        logger.exception("Error in chatgpt handler")
+        await message.reply("🚨 Error: Safone API failed or no response.")
 
 # ─── RUN BOT ───────────────────────────────────────────────────
 if __name__ == "__main__":
-    logger.info("🚀 Bot is starting...")
+    logger.info("🚀 Bot is starting…")
     dp.run_polling(bot)
