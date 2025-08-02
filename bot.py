@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ParseMode
+from aiogram.filters import CommandStart
 from aiogram.client.default import DefaultBotProperties
 
 from SafoneAPI import SafoneAPI
@@ -30,10 +31,11 @@ bot = Bot(
 dp = Dispatcher()
 
 # ─── PLUGINS ──────────────────────────────────────────────────
-import fragment_url   # inline 888 → fragment.com
+import fragment_url   # inline 888 → fragment.com URL
 import speed          # /speed VPS speedtest
-import update         # /update: auto-pull, summary & hot-restart
+import update         # /update auto-pull & summary
 import review         # /review code quality + /help
+import floor          # /888 current floor price
 
 # ─── SAFONEAPI CLIENT ──────────────────────────────────────────
 api = SafoneAPI()
