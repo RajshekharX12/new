@@ -31,9 +31,9 @@ bot = Bot(
 dp = Dispatcher()
 
 # ─── PLUGINS ──────────────────────────────────────────────────
-# Needs to come *after* dp is created
-import fragment_url   # inline 888 → fragment.com handler
-import speed          # /speed VPS speedtest handler
+import fragment_url   # inline 888 → fragment.com
+import speed          # /speed VPS speedtest
+import update         # /update auto-pull & summary
 
 # ─── SAFONEAPI CLIENT ──────────────────────────────────────────
 api = SafoneAPI()
@@ -43,11 +43,11 @@ api = SafoneAPI()
 async def start(message: types.Message):
     await message.answer(
         "👋 Welcome! Send me any text and I'll reply via SafoneAPI.\n"
-        "Use /speed to run a VPS speed test."
+        "• /speed – run a VPS speed test\n"
+        "• /update – pull latest code and report changes"
     )
 
-# ─── ChatGPT FALLBACK HANDLER ───────────────────────────────────
-# Catches *any* text message that isn't a command
+# ─── CHATGPT FALLBACK ──────────────────────────────────────────
 @dp.message(F.text & ~F.text.startswith("/"))
 async def chatgpt_handler(message: types.Message):
     text = message.text.strip()
@@ -56,14 +56,11 @@ async def chatgpt_handler(message: types.Message):
 
     try:
         response = await api.chatgpt(text)
-        answer = getattr(response, "message", None)
-        if not answer:
-            raise ValueError("Invalid response from API")
-        safe = html.escape(answer)
-        await message.answer(safe)
+        answer = getattr(response, "message", None) or str(response)
+        await message.answer(html.escape(answer))
     except Exception:
         logger.exception("Error in chatgpt handler")
-        await message.reply("🚨 Error: Safone API failed or no response.")
+        await message.reply("🚨 Error: SafoneAPI failed or no response.")
 
 # ─── RUN BOT ───────────────────────────────────────────────────
 if __name__ == "__main__":
