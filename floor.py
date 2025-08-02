@@ -3,16 +3,16 @@
 floor.py
 
 Handler for /888:
-  • Scrapes the fragment.com sale listings (SSR) with a proper User-Agent
-  • Finds the first +888 listing link
-  • Fetches its detail page
-  • Extracts and reports TON price and USD equivalent
+  1) Hits the JSON API for sale listings
+  2) Falls back to parsing the SSR HTML if JSON fails
+  3) Reports the first +888 number’s TON price and USD equivalent
 """
 
 import sys
-import re
 import logging
 import requests
+import re
+import json
 from aiogram.filters import Command
 from aiogram.types import Message
 
@@ -23,7 +23,6 @@ bot   = _main.bot
 
 logger = logging.getLogger(__name__)
 
-# warm up a session with a real browser UA
 session = requests.Session()
 session.headers.update({
     "User-Agent": (
@@ -37,34 +36,57 @@ session.headers.update({
 async def floor_handler(message: Message):
     status = await message.reply("🔍 Fetching current floor price…")
     try:
-        # 1) Fetch the sale listings page
-        list_url = "https://fragment.com/numbers?filter=sale"
-        resp = session.get(list_url, timeout=10)
-        resp.raise_for_status()
-        html_text = resp.text
-
-        # 2) Find the first +888 listing link (SSR)
-        m = re.search(r'href=[\'"](/number/888\d+/code)[\'"]', html_text)
+        # --- 1) Try the JSON API endpoint ---
+        api_url = "https://fragment.com/api/numbers?filter=sale"
+        resp = session.get(api_url, timeout=10)
+        if resp.ok and resp.headers.get("Content-Type", "").startswith("application/json"):
+            data = resp.json()
+            # Expecting a list of listings
+            if isinstance(data, list) and data:
+                first = data[0]
+                number = first.get("number")
+                ton    = first.get("assetPrice", {}).get("value") or first.get("tokenPrice") or first.get("price")
+                usd    = first.get("fiatPrice") or first.get("usdPrice")
+                if number and ton and usd:
+                    await status.delete()
+                    return await message.answer(
+                        f"💰 Current Floor Number: +{number}\n\n"
+                        f"• Price: {ton} TON (~${usd})"
+                    )
+        # --- 2) Fallback to HTML/SSR parse ---
+        page_url = "https://fragment.com/numbers?filter=sale"
+        page = session.get(page_url, timeout=10)
+        page.raise_for_status()
+        html_text = page.text
+        # look for __NEXT_DATA__
+        m = re.search(r'<script[^>]+id="__NEXT_DATA__"[^>]*>(\{.*?\})</script>', html_text, re.DOTALL)
         if not m:
-            raise ValueError("No +888 listings found in page HTML")
-        path   = m.group(1)  # e.g. /number/88804686913/code
-        number = path.split("/")[2]  # e.g. 88804686913
-
-        # 3) Fetch the detail page
-        detail_url  = f"https://fragment.com{path}"
-        detail_resp = session.get(detail_url, timeout=10)
-        detail_resp.raise_for_status()
-        detail_html = detail_resp.text
-
-        # 4) Extract TON price and USD equivalent
-        ton_m = re.search(r'(\d+)\s*TON\b', detail_html)
-        usd_m = re.search(r'~\s*\$([\d,]+)', detail_html)
-        if not ton_m or not usd_m:
-            raise ValueError("Could not parse price information")
-        ton = ton_m.group(1)
-        usd = usd_m.group(1)
-
-        # 5) Send the result
+            raise ValueError("No SSR data found")
+        data = json.loads(m.group(1))
+        # recursive search for listing nodes
+        def find_list(obj):
+            if isinstance(obj, dict):
+                # look for an array named "nodes" containing dicts with "number"
+                nodes = obj.get("nodes")
+                if isinstance(nodes, list) and nodes and isinstance(nodes[0], dict) and "number" in nodes[0]:
+                    return nodes
+                for v in obj.values():
+                    res = find_list(v)
+                    if res: return res
+            elif isinstance(obj, list):
+                for item in obj:
+                    res = find_list(item)
+                    if res: return res
+            return None
+        nodes = find_list(data)
+        if not nodes:
+            raise ValueError("No listings in SSR data")
+        first = nodes[0]
+        number = first.get("number")
+        ton    = (first.get("assetPrice") or {}).get("value") or first.get("tokenPrice") or first.get("price")
+        usd    = first.get("fiatPrice") or first.get("usdPrice")
+        if not (number and ton and usd):
+            raise ValueError("Incomplete price data in SSR")
         await status.delete()
         await message.answer(
             f"💰 Current Floor Number: +{number}\n\n"
