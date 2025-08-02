@@ -3,27 +3,27 @@
 floor.py
 
 Handler for /888:
-  • Scrapes fragment.com/numbers?filter=sale
-  • Finds the first +888 listing link
-  • Fetches its detail page
-  • Extracts and reports TON price and USD equivalent
+  • Loads the sale page’s __NEXT_DATA__ JSON
+  • Finds the first +888 collectible
+  • Reports its TON price and USD equivalent
 """
 
 import sys
-import re
+import json
 import logging
 import requests
+import re
 from aiogram.filters import Command
 from aiogram.types import Message
 
-# grab dispatcher & bot from main
+# grab dispatcher from main
 _main = sys.modules["__main__"]
 dp    = _main.dp
 bot   = _main.bot
 
 logger = logging.getLogger(__name__)
 
-# set up a session with a browser‐like UA
+# Browser-like session
 session = requests.Session()
 session.headers.update({
     "User-Agent": (
@@ -33,40 +33,65 @@ session.headers.update({
     )
 })
 
+def _find_listings(obj):
+    """Recursively search for a list of dicts that each have a 'number' key."""
+    if isinstance(obj, dict):
+        # often in NextData: obj["props"]["pageProps"]["listings"]["nodes"]
+        for k, v in obj.items():
+            if isinstance(v, list) and v and isinstance(v[0], dict) and "number" in v[0]:
+                return v
+            res = _find_listings(v)
+            if res:
+                return res
+    elif isinstance(obj, list):
+        for item in obj:
+            res = _find_listings(item)
+            if res:
+                return res
+    return None
+
 @dp.message(Command(commands=["888"]))
 async def floor_handler(message: Message):
     status = await message.reply("🔍 Fetching current floor price…")
     try:
-        # 1) Fetch the listings page
-        list_url = "https://fragment.com/numbers?filter=sale"
-        r = session.get(list_url, timeout=10)
-        r.raise_for_status()
-        html = r.text
+        # 1) GET the page
+        url  = "https://fragment.com/numbers?filter=sale"
+        resp = session.get(url, timeout=10)
+        resp.raise_for_status()
 
-        # 2) Extract the first +888 detail path
-        m = re.search(r'href="(/number/888[0-9]+/code)"', html)
+        # 2) Extract the JSON blob
+        m = re.search(r'<script[^>]+id="__NEXT_DATA__"[^>]*>(\{.*?\})</script>', resp.text, re.DOTALL)
         if not m:
-            raise ValueError("No +888 listings found on the sale page")
-        path   = m.group(1)                # e.g. /number/88804686913/code
-        number = path.split("/")[2]        # e.g. 88804686913
+            raise ValueError("Unable to find Next.js data on page")
+        data = json.loads(m.group(1))
 
-        # 3) Fetch the detail page
-        detail_url = f"https://fragment.com{path}"
-        rd = session.get(detail_url, timeout=10)
-        rd.raise_for_status()
-        dhtml = rd.text
+        # 3) Locate the listings array
+        listings = _find_listings(data)
+        if not listings:
+            raise ValueError("No listings array found in page data")
 
-        # 4) Parse TON price (e.g. "720 TON")
-        m_ton = re.search(r'([\d,]+)\s*TON\b', dhtml)
-        if not m_ton:
-            raise ValueError("Couldn't parse TON price")
-        ton = m_ton.group(1).replace(",", "")
+        # 4) Pick the first +888 entry
+        first = next((item for item in listings if str(item.get("number","")).startswith("888")), None)
+        if not first:
+            raise ValueError("No +888 collectible found in listings")
 
-        # 5) Parse USD equivalent (e.g. "~ $2,602")
-        m_usd = re.search(r'~\s*\$([\d,]+)', dhtml)
-        usd = m_usd.group(1).replace(",", "") if m_usd else "N/A"
+        number = first["number"]
+        # price fields (try several keys)
+        ton = None
+        for key in ("assetPrice","tokenPrice","price"):
+            val = first.get(key)
+            if isinstance(val, dict) and "value" in val:
+                ton = val["value"]
+            elif isinstance(val,(int,float,str)):
+                ton = val
+            if ton:
+                break
 
-        # 6) Report back
+        usd = first.get("fiatPrice") or first.get("usdPrice") or first.get("priceUsd")
+        if not (ton and usd):
+            raise ValueError("Incomplete price info in listing")
+
+        # 5) Report back
         await status.delete()
         await message.answer(
             f"💰 Current Floor Number: +{number}\n\n"
