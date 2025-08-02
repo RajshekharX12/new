@@ -1,3 +1,4 @@
+# bot.py
 import os
 import html
 import logging
@@ -34,6 +35,7 @@ dp = Dispatcher()
 import fragment_url   # inline 888 → fragment.com
 import speed          # /speed VPS speedtest
 import update         # /update auto-pull & summary
+import review         # /review code quality + /help
 
 # ─── SAFONEAPI CLIENT ──────────────────────────────────────────
 api = SafoneAPI()
@@ -42,9 +44,12 @@ api = SafoneAPI()
 @dp.message(CommandStart())
 async def start(message: types.Message):
     await message.answer(
-        "👋 Welcome! Send me any text and I'll reply via SafoneAPI.\n"
-        "• /speed – run a VPS speed test\n"
-        "• /update – pull latest code and report changes"
+        "👋 Welcome! I can help you with:\n"
+        "• /speed  — run a VPS speed test 🌐\n"
+        "• /update — pull latest code & report changes 🔄\n"
+        "• /review — code quality review 📋\n"
+        "• /help   — list commands ❓\n\n"
+        "✉️ Send any other text and I'll reply via ChatGPT ✨"
     )
 
 # ─── CHATGPT FALLBACK ──────────────────────────────────────────
@@ -53,13 +58,12 @@ async def chatgpt_handler(message: types.Message):
     text = message.text.strip()
     if not text:
         return
-
     try:
-        response = await api.chatgpt(text)
-        answer = getattr(response, "message", None) or str(response)
+        resp = await api.chatgpt(text)
+        answer = getattr(resp, "message", None) or str(resp)
         await message.answer(html.escape(answer))
     except Exception:
-        logger.exception("Error in chatgpt handler")
+        logger.exception("chatgpt error")
         await message.reply("🚨 Error: SafoneAPI failed or no response.")
 
 # ─── RUN BOT ───────────────────────────────────────────────────
