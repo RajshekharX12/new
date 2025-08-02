@@ -3,9 +3,10 @@
 floor.py
 
 Handler for /888:
-  • Uses Playwright headless Chromium to load fragment.com fully
-  • Finds the first +888 listing
-  • Extracts its TON price & USD equivalent
+  • Uses Playwright headless Chromium
+  • Waits for network idle
+  • Extracts all links, filters the first +888 link
+  • Fetches its detail page, parses TON and USD price
 """
 
 import sys
@@ -27,21 +28,35 @@ async def fetch_floor():
     async with async_playwright() as p:
         browser = await p.chromium.launch()
         page = await browser.new_page()
-        await page.goto("https://fragment.com/numbers?filter=sale", wait_until="domcontentloaded")
-        await page.wait_for_selector("a[href^='/number/888'][href$='/code']", timeout=15000)
-        href = await page.eval_on_selector("a[href^='/number/888'][href$='/code']", "el => el.href")
-        number = "+" + href.rstrip("/code").split("/")[-1]
-        await page.goto(href, wait_until="domcontentloaded")
-        await page.wait_for_selector("text=/\\d+\\s*TON/", timeout=15000)
+        # 1) Navigate and wait for network idle
+        await page.goto("https://fragment.com/numbers?filter=sale", wait_until="networkidle")
+        # 2) Evaluate all <a> hrefs on the page
+        hrefs = await page.eval_on_selector_all(
+            "a[href]",
+            "els => els.map(e => e.href)"
+        )
+        # 3) Find the first matching +888 listing
+        candidate = next(
+            (h for h in hrefs if "/number/888" in h and h.rstrip("/").endswith("/code")),
+            None
+        )
+        if not candidate:
+            await browser.close()
+            raise ValueError("No +888 listing link found")
+        number = "+" + candidate.rstrip("/").split("/")[-2]
+
+        # 4) Navigate to detail page
+        await page.goto(candidate, wait_until="networkidle")
         content = await page.content()
         await browser.close()
 
-    ton_m = re.search(r"([\d,]+)\s*TON", content)
-    usd_m = re.search(r"~\s*\$([\d,.,]+)", content)
-    if not ton_m or not usd_m:
-        raise ValueError("Price info not found")
-    ton = ton_m.group(1).replace(",", "")
-    usd = usd_m.group(1).replace(",", "")
+    # 5) Regex extract prices
+    m_ton = re.search(r"([\d,]+)\s*TON\b", content)
+    m_usd = re.search(r"~\s*\$([\d,.,]+)", content)
+    if not m_ton or not m_usd:
+        raise ValueError("Could not parse price information")
+    ton = m_ton.group(1).replace(",", "")
+    usd = m_usd.group(1).replace(",", "")
     return number, ton, usd
 
 @dp.message(Command(commands=["888"]))
