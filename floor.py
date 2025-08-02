@@ -3,7 +3,7 @@
 floor.py
 
 Handler for /888:
-  • Loads the sale page’s __NEXT_DATA__ JSON
+  • Uses Next.js data endpoint to fetch numbers JSON
   • Finds the first +888 collectible
   • Reports its TON price and USD equivalent
 """
@@ -16,14 +16,14 @@ import re
 from aiogram.filters import Command
 from aiogram.types import Message
 
-# grab dispatcher from main
+# Grab dispatcher & bot from main
 _main = sys.modules["__main__"]
 dp    = _main.dp
 bot   = _main.bot
 
 logger = logging.getLogger(__name__)
 
-# Browser-like session
+# Browser‐like session
 session = requests.Session()
 session.headers.update({
     "User-Agent": (
@@ -34,64 +34,73 @@ session.headers.update({
 })
 
 def _find_listings(obj):
-    """Recursively search for a list of dicts that each have a 'number' key."""
+    """Recursively search for a list of dicts each having a 'number' key."""
     if isinstance(obj, dict):
-        # often in NextData: obj["props"]["pageProps"]["listings"]["nodes"]
-        for k, v in obj.items():
-            if isinstance(v, list) and v and isinstance(v[0], dict) and "number" in v[0]:
-                return v
-            res = _find_listings(v)
-            if res:
-                return res
+        for v in obj.values():
+            found = _find_listings(v)
+            if found:
+                return found
+    elif isinstance(obj, list) and obj and isinstance(obj[0], dict) and "number" in obj[0]:
+        return obj
     elif isinstance(obj, list):
         for item in obj:
-            res = _find_listings(item)
-            if res:
-                return res
+            found = _find_listings(item)
+            if found:
+                return found
     return None
 
 @dp.message(Command(commands=["888"]))
 async def floor_handler(message: Message):
     status = await message.reply("🔍 Fetching current floor price…")
     try:
-        # 1) GET the page
-        url  = "https://fragment.com/numbers?filter=sale"
-        resp = session.get(url, timeout=10)
-        resp.raise_for_status()
+        # 1) GET main page to extract buildId
+        page_url = "https://fragment.com/numbers?filter=sale"
+        r = session.get(page_url, timeout=10)
+        r.raise_for_status()
+        html = r.text
 
-        # 2) Extract the JSON blob
-        m = re.search(r'<script[^>]+id="__NEXT_DATA__"[^>]*>(\{.*?\})</script>', resp.text, re.DOTALL)
+        # 2) Extract __NEXT_DATA__ JSON and its buildId
+        m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
         if not m:
-            raise ValueError("Unable to find Next.js data on page")
-        data = json.loads(m.group(1))
+            raise ValueError("Can't find Next.js data on page")
+        next_data = json.loads(m.group(1))
+        build_id = next_data.get("buildId")
+        if not build_id:
+            raise ValueError("No buildId in Next.js data")
 
-        # 3) Locate the listings array
+        # 3) Fetch the JSON endpoint for this page
+        json_url = f"https://fragment.com/_next/data/{build_id}/numbers.json?filter=sale"
+        jr = session.get(json_url, timeout=10)
+        jr.raise_for_status()
+        data = jr.json()
+
+        # 4) Locate the listings array
         listings = _find_listings(data)
         if not listings:
-            raise ValueError("No listings array found in page data")
+            raise ValueError("No listings found in page data")
 
-        # 4) Pick the first +888 entry
-        first = next((item for item in listings if str(item.get("number","")).startswith("888")), None)
+        # 5) Find the first +888 entry
+        first = next((x for x in listings if str(x.get("number","")).startswith("888")), None)
         if not first:
-            raise ValueError("No +888 collectible found in listings")
+            raise ValueError("No +888 collectible in listings")
 
         number = first["number"]
-        # price fields (try several keys)
+        # Extract TON price from various possible fields
         ton = None
-        for key in ("assetPrice","tokenPrice","price"):
+        for key in ("assetPrice", "tokenPrice", "price"):
             val = first.get(key)
             if isinstance(val, dict) and "value" in val:
                 ton = val["value"]
-            elif isinstance(val,(int,float,str)):
+            elif isinstance(val, (int, float, str)):
                 ton = val
             if ton:
                 break
 
         usd = first.get("fiatPrice") or first.get("usdPrice") or first.get("priceUsd")
-        if not (ton and usd):
+        if ton is None or usd is None:
             raise ValueError("Incomplete price info in listing")
 
-        # 5) Report back
+        # 6) Send the result
         await status.delete()
         await message.answer(
             f"💰 Current Floor Number: +{number}\n\n"
