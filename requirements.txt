@@ -1,3 +1,3 @@
 aiogram>=3.0.0
-safoneapi>=0.1.0
-
+safoneapi>=1.0.0
+python-dotenv>=0.21.0
