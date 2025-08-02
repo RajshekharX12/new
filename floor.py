@@ -3,26 +3,26 @@
 floor.py
 
 Handler for /888:
-  • Uses Selenium headless Chrome to load the MarketApp collection page
-  • Waits for the “Floor” label in the DOM
-  • Extracts the TON and USD prices from its container
+  • Uses Selenium + headless Chrome to load Fragment’s sale page
+  • Finds the first +888 number link
+  • Navigates there and extracts TON & USD prices
   • Replies with "+888 floor: <TON> TON (~$<USD>)"
 """
 
 import sys
 import logging
+import time
 import asyncio
 
 from aiogram.filters import Command
 from aiogram.types import Message
 
-# Selenium imports
 from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.options import Options
+
+# webdriver-manager to auto-install chromedriver
 from webdriver_manager.chrome import ChromeDriverManager
 
 # grab dispatcher & bot from main
@@ -41,33 +41,30 @@ def scrape_floor():
     options.add_argument("--window-size=1920,1080")
     options.add_argument("--log-level=3")
 
-    # Only keyword args: service= and options=
+    # Auto-install chromedriver
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=options)
-    wait = WebDriverWait(driver, 15)
 
     try:
-        url = (
-            "https://marketapp.ws/collection/"
-            "EQAOQdwdw8kGftJCSFgOErM1mBjYPe4DBPq8-AhF6vr9si5N/"
-        )
-        driver.get(url)
+        # Step 1: load the sale listings
+        driver.get("https://fragment.com/numbers?filter=sale")
+        time.sleep(5)  # allow JS to run
 
-        # 1) Wait for the “Floor” label
-        floor_label = wait.until(
-            EC.presence_of_element_located((By.XPATH, "//div[text()='Floor']"))
-        )
-        floor_container = floor_label.find_element(By.XPATH, "..")
+        # Step 2: find & click the first +888 link
+        link = driver.find_element(By.CSS_SELECTOR, 'a[href^="/number/888"]')
+        href = link.get_attribute("href")
+        driver.get(href)
+        time.sleep(5)  # allow detail page JS to run
 
-        # 2) Pull out the three lines: label, TON, USD
-        lines = floor_container.text.strip().split("\n")
-        if len(lines) < 3:
-            raise RuntimeError("Unexpected layout: floor container text lines < 3")
+        # Step 3: scrape the prices
+        # 👉 You may need to adjust these selectors if the site updates!
+        ton_text = driver.find_element(By.CSS_SELECTOR, ".sc-eCImvq.hOEfDz").text  # e.g. "733 TON"
+        usd_text = driver.find_element(By.CSS_SELECTOR, ".sc-hXhQae.hqwNId").text  # e.g. "~ $2,634"
 
-        ton_text = lines[1].split()[0]     # e.g. "707"
-        usd_text = lines[2].lstrip("~$")   # e.g. "2534"
-
-        return ton_text, usd_text
+        # clean up
+        ton = ton_text.split()[0].replace(",", "")
+        usd = usd_text.strip("~ $").replace(",", "")
+        return ton, usd
 
     finally:
         driver.quit()
@@ -78,10 +75,8 @@ async def floor_handler(message: Message):
     try:
         loop = asyncio.get_event_loop()
         ton, usd = await loop.run_in_executor(None, scrape_floor)
-
         await status.delete()
         await message.answer(f"💰 +888 floor: {ton} TON (~${usd})")
-
     except Exception as e:
         logger.exception("floor error")
         from html import escape
