@@ -1,9 +1,9 @@
 import os
 import html
 import logging
+import asyncio
 from dotenv import load_dotenv
 
-import asyncio
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart
@@ -29,14 +29,15 @@ bot = Bot(
     token=API_TOKEN,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML)
 )
-dp = Dispatcher(bot)
+# <-- instantiate with no args
+dp = Dispatcher()
+
 api = SafoneAPI()
 
 # ─── HANDLER: "bhai" TRIGGER ───────────────────────────────────
 @dp.message(F.text.startswith("bhai"))
 async def chatgpt_handler(message: types.Message):
     try:
-        # extract query after "bhai"
         parts = message.text.split(maxsplit=1)
         query = parts[1] if len(parts) > 1 else None
         if not query and message.reply_to_message:
@@ -55,7 +56,6 @@ async def chatgpt_handler(message: types.Message):
         )
         full_prompt = prompt_intro + query
 
-        # fetch from SafoneAPI
         response = await api.chatgpt(full_prompt)
         if not response or not getattr(response, "message", None):
             raise ValueError("Invalid response from API")
