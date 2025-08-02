@@ -12,8 +12,9 @@ from safoneapi import SafoneAPI, errors as safone_errors
 # Load .env
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise RuntimeError("Missing BOT_TOKEN in .env")
+SAFONE_API_KEY = os.getenv("SAFONE_API_KEY")
+if not BOT_TOKEN or not SAFONE_API_KEY:
+    raise RuntimeError("Missing BOT_TOKEN or SAFONE_API_KEY in .env")
 
 # Logging
 logging.basicConfig(level=logging.INFO)
@@ -22,7 +23,7 @@ logger = logging.getLogger(__name__)
 # Bot init
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot)
-api = SafoneAPI()  # No key needed
+api = SafoneAPI(SAFONE_API_KEY)
 
 @dp.message_handler(commands=["start", "help"])
 async def send_welcome(message: types.Message):
