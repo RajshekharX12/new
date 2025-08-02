@@ -3,18 +3,19 @@
 floor.py
 
 Handler for /888:
-  • Uses the Unofficial Fragment API (userapi) to fetch sale listings
-  • Grabs the first +888 number, its TON price & USD equivalent
+  • Uses the unofficial Fragment JSON client (vendored under vendor/userapi)
+  • Fetches sale listings and reports the first +888 number’s TON & USD price
 """
 
 import sys
 import logging
 from aiogram.filters import Command
 from aiogram.types import Message
-from vendor.userapi import FragmentClient
- # the unofficial wrapper
 
-# grab dispatcher from main
+# import the vendored client
+from vendor.userapi import FragmentClient
+
+# grab dispatcher & bot from main
 _main = sys.modules["__main__"]
 dp    = _main.dp
 
@@ -25,9 +26,9 @@ async def floor_handler(message: Message):
     status = await message.reply("🔍 Fetching current floor price…")
     try:
         client = FragmentClient()
-        # fetch all “for sale” numbers
+        # fetch sale listings
         data = await client.get_numbers(filter="sale")
-        if not data or not data.nodes:
+        if not data or not getattr(data, "nodes", None):
             raise ValueError("No sale listings found")
 
         first = data.nodes[0]
