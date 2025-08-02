@@ -1,4 +1,17 @@
+# update.py
+#!/usr/bin/env python3
+"""
+update.py
+
+Handler for /update:
+  1) Pull latest code
+  2) Show added/removed files
+  3) Use ChatGPT for a one-bullet-per-category feature summary
+  4) Restart the bot to apply updates
+"""
+
 import sys
+import os
 import subprocess
 import logging
 from aiogram.filters import Command
@@ -16,72 +29,71 @@ api = SafoneAPI()
 @dp.message(Command(commands=["update"]))
 async def update_handler(message: Message):
     status = await message.reply("🔄 Pulling latest code…")
-
     try:
-        # 1) Record old HEAD
+        # 1) Record current commit
         old_sha = subprocess.check_output(
             ["git", "rev-parse", "HEAD"], stderr=subprocess.STDOUT
         ).decode().strip()
 
-        # 2) Git pull
+        # 2) Pull
         subprocess.check_output(["git", "pull"], stderr=subprocess.STDOUT)
 
-        # 3) Record new HEAD
+        # 3) New commit
         new_sha = subprocess.check_output(
             ["git", "rev-parse", "HEAD"], stderr=subprocess.STDOUT
         ).decode().strip()
 
-        # 4) Get diff of names and statuses
-        diff_output = subprocess.check_output(
+        # 4) Diff name-status
+        diff_lines = subprocess.check_output(
             ["git", "diff", "--name-status", old_sha, new_sha],
             stderr=subprocess.STDOUT
         ).decode().splitlines()
 
-        added = [line.split("\t",1)[1] for line in diff_output if line.startswith("A\t")]
-        removed = [line.split("\t",1)[1] for line in diff_output if line.startswith("D\t")]
+        added   = [ln.split("\t",1)[1] for ln in diff_lines if ln.startswith("A\t")]
+        removed = [ln.split("\t",1)[1] for ln in diff_lines if ln.startswith("D\t")]
 
-        # 5) Remove status message
+        # 5) Delete the “pulling…” message
         await status.delete()
 
         # 6) Raw file summary
-        added_section = [f"• {p}" for p in added] or ["• None"]
-        removed_section = [f"• {p}" for p in removed] or ["• None"]
+        added_list   = added or ["None"]
+        removed_list = removed or ["None"]
 
-        raw_lines = [
+        raw = [
             "✅ *Update complete!*",
             "",
             "✨ *Added:*",
-            *added_section,
+            *(f"• {f}" for f in added_list),
             "",
             "❌ *Removed:*",
-            *removed_section,
+            *(f"• {f}" for f in removed_list),
         ]
-        await message.answer("\n".join(raw_lines), parse_mode="Markdown")
+        await message.answer("\n".join(raw), parse_mode="Markdown")
 
-        # 7) Ask ChatGPT for concise summary
-        added_str = "\n".join(f"- {p}" for p in added) if added else "- None"
-        removed_str = "\n".join(f"- {p}" for p in removed) if removed else "- None"
+        # 7) ChatGPT feature summary prompt
+        added_str   = "\n".join(f"- {f}" for f in added)   if added   else "- None"
+        removed_str = "\n".join(f"- {f}" for f in removed) if removed else "- None"
 
         prompt = (
-            "Repo update:\n"
+            "The repository was updated:\n"
             f"Added files:\n{added_str}\n"
             f"Removed files:\n{removed_str}\n\n"
-            "In one short bullet, describe what was *added*.\n"
-            "In one short bullet, describe what was *removed*."
+            "In exactly two very short bullets, describe the *features* added and removed."
         )
-        resp = await api.chatgpt(prompt)
+        resp    = await api.chatgpt(prompt)
         summary = getattr(resp, "message", str(resp)).strip()
 
-        # 8) Send the one-line summary
-        await message.answer(f"*Change Summary:*\n{summary}", parse_mode="Markdown")
+        # 8) Send the one-bullet summary
+        await message.answer(f"*Feature Summary:*\n{summary}", parse_mode="Markdown")
+
+        # 9) Restart process (hot-reload code)
+        await message.answer("🔄 Restarting bot to apply updates…")
+        os.execv(sys.executable, [sys.executable] + sys.argv)
 
     except subprocess.CalledProcessError as e:
         logger.exception("Git command failed")
-        error_output = e.output.decode() if hasattr(e, "output") else str(e)
-        await status.edit_text(
-            f"❌ Update failed:\n```\n{error_output}\n```",
-            parse_mode="Markdown"
-        )
+        out = e.output.decode() if hasattr(e, "output") else str(e)
+        await status.edit_text(f"❌ Update failed:\n```\n{out}\n```", parse_mode="Markdown")
     except Exception as e:
         logger.exception("Unexpected error in update")
         await status.edit_text(f"❌ Update error: `{e}`", parse_mode="Markdown")
