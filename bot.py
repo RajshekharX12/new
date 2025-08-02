@@ -30,6 +30,10 @@ bot = Bot(
 )
 dp = Dispatcher()
 
+# ─── INLINE FRAGMENT HANDLER ──────────────────────────────────
+# this will register the @dp.inline_query handler from fragment_url.py
+import fragment_url
+
 # ─── SAFONE CLIENT ─────────────────────────────────────────────
 api = SafoneAPI()
 
