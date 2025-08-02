@@ -11,7 +11,8 @@ import sys
 import logging
 from aiogram.filters import Command
 from aiogram.types import Message
-from userapi import FragmentClient  # the unofficial wrapper
+from vendor.userapi import FragmentClient
+ # the unofficial wrapper
 
 # grab dispatcher from main
 _main = sys.modules["__main__"]
