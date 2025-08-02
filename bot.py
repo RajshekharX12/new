@@ -36,13 +36,15 @@ async def forward_to_safone(message: types.Message):
         return
 
     try:
-        # Use the gemini endpoint for conversational AI
-        reply = await api.gemini(text)
+        # Use the GPT endpoint
+        reply = await api.gpt(text)
     except AttributeError:
-        # If you still get this, list out available methods:
+        # If .gpt() still doesn't exist, list available methods:
         methods = [m for m in dir(api) if callable(getattr(api, m)) and not m.startswith("_")]
-        await message.reply("⚠️ This wrapper has no `.gemini()`. Available methods are:\n" +
-                            ", ".join(methods))
+        await message.reply(
+            "⚠️ `.gpt()` not found. Available methods:\n" +
+            ", ".join(methods)
+        )
         return
     except Exception as e:
         logger.exception("SafoneAPI error")
@@ -52,7 +54,6 @@ async def forward_to_safone(message: types.Message):
     await message.answer(reply)
 
 async def main():
-    # Start long-polling
     await dp.start_polling(bot, skip_updates=True)
 
 if __name__ == "__main__":
