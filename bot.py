@@ -6,39 +6,47 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from SafoneAPI import SafoneAPI
 
-# Load .env
+# Load your Telegram token
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("Missing BOT_TOKEN in .env")
 
-# Logging
+# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize
+# Initialize Telegram bot and dispatcher
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
-api = SafoneAPI()  # no key needed
+
+# Initialize SafoneAPI client (no API key needed)
+api = SafoneAPI()
 
 @dp.message(Command(commands=["start", "help"]))
 async def cmd_start(message: types.Message):
-    await message.reply("👋 Hi! Send me any text and I'll reply via SafoneAPI.")
+    await message.reply(
+        "👋 Hi there! Send me any text and I'll reply using SafoneAPI."
+    )
 
 @dp.message()
-async def handle_text(message: types.Message):
+async def forward_to_safone(message: types.Message):
     text = message.text.strip()
     if not text:
         return
+
     try:
-        # call the async SafoneAPI method
+        # Direct async call to SafoneAPI
         reply = await api.chat(text)
     except Exception as e:
         logger.exception("SafoneAPI error")
-        reply = "❌ An error occurred. Please try again later."
+        await message.reply(f"❌ SafoneAPI Error:\n{e}")
+        return
+
     await message.answer(reply)
 
 async def main():
+    # Start long-polling
     await dp.start_polling(bot, skip_updates=True)
 
 if __name__ == "__main__":
