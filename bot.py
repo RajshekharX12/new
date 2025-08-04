@@ -1,43 +1,43 @@
+#!/usr/bin/env python3
 import os
 import html
 import logging
-from dotenv import load_dotenv
 
+from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ParseMode
-from aiogram.filters import CommandStart
 
 from SafoneAPI import SafoneAPI
 
-# ─── LOAD ENV ─────────────────────────────────────────────────
+# ─── LOAD ENV ────────────────────────────────────────────────────
 load_dotenv()
-API_TOKEN = os.getenv("BOT_TOKEN")
-if not API_TOKEN:
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set in .env")
 
-# ─── LOGGING ──────────────────────────────────────────────────
+# ─── LOGGING ─────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
-# ─── BOT & DISPATCHER ──────────────────────────────────────────
-# parse_mode is passed directly
-bot = Bot(token=API_TOKEN, parse_mode=ParseMode.HTML)
-dp = Dispatcher()
+# ─── BOT & DISPATCHER ────────────────────────────────────────────
+bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.HTML)
+dp  = Dispatcher()
 
-# ─── PLUGINS ──────────────────────────────────────────────────
-import fragment_url   # inline 888 → fragment.com URL
-import speed          # /speed VPS speedtest
-import update         # /update auto-pull & summary
-import review         # /review code quality + /help
-import floor          # /888 current floor price
-
-# ─── SAFONEAPI CLIENT ──────────────────────────────────────────
+# ─── SAFONEAPI CLIENT ─────────────────────────────────────────────
 api = SafoneAPI()
 
-# ─── CHATGPT FALLBACK ──────────────────────────────────────────
+# ─── PLUGINS & HANDLERS ──────────────────────────────────────────
+# Inline fragment links, speedtest, code review, floor price, update
+import fragment_url   # inline 888 → fragment.com URL
+import speed          # /speed VPS speedtest
+import review         # /review code quality + /help
+import floor          # /888 current floor price
+import update         # /update auto-pull & summary
+
+# ─── CHATGPT FALLBACK ─────────────────────────────────────────────
 @dp.message(F.text & ~F.text.startswith("/"))
 async def chatgpt_handler(message: types.Message):
     text = message.text.strip()
@@ -46,13 +46,12 @@ async def chatgpt_handler(message: types.Message):
     try:
         resp = await api.chatgpt(text)
         answer = getattr(resp, "message", None) or str(resp)
-        # HTML-escape just in case
         await message.answer(html.escape(answer))
     except Exception:
         logger.exception("chatgpt error")
         await message.reply("🚨 Error: SafoneAPI failed or no response.")
 
-# ─── RUN BOT ───────────────────────────────────────────────────
+# ─── RUN BOT ─────────────────────────────────────────────────────
 if __name__ == "__main__":
     logger.info("🚀 Bot is starting…")
     dp.run_polling(bot)
