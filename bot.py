@@ -89,7 +89,6 @@ async def run_update_process() -> tuple[str, str, list[str], list[str], list[str
     added    = [ln.split("\t",1)[1] for ln in diff_lines if ln.startswith("A\t")]
     modified = [ln.split("\t",1)[1] for ln in diff_lines if ln.startswith("M\t")]
     removed  = [ln.split("\t",1)[1] for ln in diff_lines if ln.startswith("D\t")]
-
     return pull_out, install_out, added, modified, removed
 
 async def deploy_to_screen(chat_id: int):
@@ -102,7 +101,7 @@ async def deploy_to_screen(chat_id: int):
     # 1) Stop running bot in session
     subprocess.call([
         "screen", "-S", SCREEN_SESSION,
-        "-X", "stuff", "\x03",  # Ctrl-C
+        "-X", "stuff", "\x03"   # Ctrl-C
     ])
 
     # 2) In-session update & reinstall
@@ -123,6 +122,7 @@ async def deploy_to_screen(chat_id: int):
         f"🚀 Updated and restarted bot in existing '{SCREEN_SESSION}' session."
     )
 
+# ─── CHATGPT FALLBACK ─────────────────────────────────────────────
 @dp.message(F.text & ~F.text.startswith("/"))
 async def chatgpt_handler(message: Message):
     text = message.text.strip()
@@ -136,21 +136,23 @@ async def chatgpt_handler(message: Message):
         logger.exception("chatgpt error")
         await message.reply("🚨 Error: SafoneAPI failed or no response.")
 
+# ─── /update COMMAND ──────────────────────────────────────────────
 @dp.message(Command("update"))
 async def update_handler(message: Message):
     status = await message.reply("🔄 Running update…")
     try:
         pull_out, install_out, added, modified, removed = await run_update_process()
 
+        # concise summary
         parts = ["🗂️ <b>Update Summary</b>:"]
         parts.append(
-            "• Git pull: <code>OK</code>" 
-            if "Already up to date." not in pull_out 
+            "• Git pull: <code>OK</code>"
+            if "Already up to date." not in pull_out
             else "• Git pull: <code>No changes</code>"
         )
         parts.append(
-            "• Dependencies: <code>Installed</code>" 
-            if "ERROR" not in install_out 
+            "• Dependencies: <code>Installed</code>"
+            if "ERROR" not in install_out
             else "• Dependencies: <code>Error</code>"
         )
         if added:
@@ -159,7 +161,6 @@ async def update_handler(message: Message):
             parts.append(f"✏️ Modified: {', '.join(modified)}")
         if removed:
             parts.append(f"❌ Removed: {', '.join(removed)}")
-        text = "\n".join(parts)
 
         kb = InlineKeyboardMarkup(
             inline_keyboard=[
@@ -170,7 +171,7 @@ async def update_handler(message: Message):
             ]
         )
 
-        await status.edit_text(text, parse_mode="HTML", reply_markup=kb)
+        await status.edit_text("\n".join(parts), parse_mode="HTML", reply_markup=kb)
     except Exception as e:
         logger.exception("Update error")
         await status.edit_text(
@@ -190,6 +191,7 @@ async def on_update_button(query: CallbackQuery):
     elif action == "deploy":
         await deploy_to_screen(chat_id)
 
+# ─── STARTUP & BACKGROUND CHECK ───────────────────────────────────
 @dp.startup()
 async def on_startup():
     global last_remote_sha
@@ -210,7 +212,7 @@ async def check_for_updates():
             if last_remote_sha and remote_sha != last_remote_sha and ADMIN_CHAT_ID:
                 last_remote_sha = remote_sha
                 kb = InlineKeyboardMarkup(
-                    inline_keyboard=[[InlineKeyboardButton(text="🔄 Update Now", callback_data="update:run")]]
+                    inline_keyboard=[[InlineKeyboardButton(text="🔄 Update Now", callback_data="update:deploy")]]
                 )
                 await bot.send_message(
                     ADMIN_CHAT_ID,
@@ -224,4 +226,8 @@ async def check_for_updates():
 # ─── RUN BOT ───────────────────────────────────────────────────────
 if __name__ == "__main__":
     logger.info("🚀 Bot is starting…")
-    dp.run_polling(bot)
+    # remove webhooks and drop any pending updates to avoid conflicts
+    asyncio.get_event_loop().run_until_complete(
+        bot.delete_webhook(drop_pending_updates=True)
+    )
+    dp.run_polling(bot, skip_updates=True)
