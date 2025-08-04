@@ -226,8 +226,4 @@ async def check_for_updates():
 # ─── RUN BOT ───────────────────────────────────────────────────────
 if __name__ == "__main__":
     logger.info("🚀 Bot is starting…")
-    # remove webhooks and drop any pending updates to avoid conflicts
-    asyncio.get_event_loop().run_until_complete(
-        bot.delete_webhook(drop_pending_updates=True)
-    )
-    dp.run_polling(bot, skip_updates=True)
+    dp.run_polling(bot, skip_updates=True, reset_webhook=True)
