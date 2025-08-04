@@ -57,6 +57,7 @@ import review         # /review code quality + /help
 import floor          # /888 current floor price
 
 # ─── HELPERS ──────────────────────────────────────────────────────
+```python
 def send_logs_as_file(chat_id: int, pull_out: str, install_out: str):
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".txt", mode="w", encoding="utf-8")
     tmp.write("=== Git Pull Output ===\n")
@@ -65,6 +66,7 @@ def send_logs_as_file(chat_id: int, pull_out: str, install_out: str):
     tmp.write(install_out + "\n")
     tmp.close()
     return bot.send_document(chat_id, FSInputFile(tmp.name), caption="📄 Full update logs")
+```
 
 # ─── UPDATE & AUTO-DEPLOY LOGIC ──────────────────────────────────
 last_remote_sha = None
@@ -89,112 +91,36 @@ async def run_update_process() -> tuple[str, str, list[str], list[str], list[str
     added    = [ln.split("\t",1)[1] for ln in diff_lines if ln.startswith("A\t")]
     modified = [ln.split("\t",1)[1] for ln in diff_lines if ln.startswith("M\t")]
     removed  = [ln.split("\t",1)[1] for ln in diff_lines if ln.startswith("D\t")]
+
     return pull_out, install_out, added, modified, removed
 
 async def deploy_to_screen(chat_id: int):
     """
-    Completely restart the 'meow' screen session:
-    - Kill any existing 'meow'
+    In-place restart inside the existing 'meow' screen session:
+    - Send Ctrl-C to stop the old bot
     - Pull & reinstall
-    - Launch a single new detached screen running bot.py
+    - Relaunch bot.py in the same session
     """
-    # 1) Kill any existing meow sessions
-    subprocess.call(["pkill", "-f", f"SCREEN -S {SCREEN_SESSION}"])
-    # 2) Update code & deps
-    subprocess.call(["git", "pull"], cwd=PROJECT_PATH)
-    subprocess.call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], cwd=PROJECT_PATH)
-    # 3) Start fresh detached screen
-    launch_cmd = f"cd {PROJECT_PATH} && exec {sys.executable} bot.py"
-    subprocess.call(["screen", "-dmS", SCREEN_SESSION, "bash", "-c", launch_cmd])
+    # 1) Stop running bot in session
+    subprocess.call([
+        "screen", "-S", SCREEN_SESSION,
+        "-X", "stuff", "\x03"   # Ctrl-C
+    ])
+
+    # 2) In-session update & reinstall
+    cmds = [
+        f"cd {PROJECT_PATH}",
+        "git pull",
+        f"{sys.executable} -m pip install -r requirements.txt",
+        f"{sys.executable} {os.path.join(PROJECT_PATH,'bot.py')}"
+    ]
+    for cmd in cmds:
+        subprocess.call([
+            "screen", "-S", SCREEN_SESSION,
+            "-X", "stuff", cmd + "\n"
+        ])
+
     await bot.send_message(
         chat_id,
-        f"🚀 Restarted bot in a single '{SCREEN_SESSION}' screen session."
+        f"🚀 Updated and restarted bot in existing '{SCREEN_SESSION}' session."
     )
-
-@dp.message(F.text & ~F.text.startswith("/"))
-async def chatgpt_handler(message: Message):
-    text = message.text.strip()
-    if not text:
-        return
-    try:
-        resp = await api.chatgpt(text)
-        answer = getattr(resp, "message", None) or str(resp)
-        await message.answer(html.escape(answer))
-    except Exception:
-        logger.exception("chatgpt error")
-        await message.reply("🚨 Error: SafoneAPI failed or no response.")
-
-@dp.message(Command("update"))
-async def update_handler(message: Message):
-    status = await message.reply("🔄 Running update…")
-    try:
-        pull_out, install_out, added, modified, removed = await run_update_process()
-
-        parts = ["🗂️ <b>Update Summary</b>:"]
-        parts.append("• Git pull: <code>OK</code>" if "Already up to date." not in pull_out else "• Git pull: <code>No changes</code>")
-        parts.append("• Dependencies: <code>Installed</code>" if "ERROR" not in install_out else "• Dependencies: <code>Error</code>")
-        if added:    parts.append(f"➕ Added: {', '.join(added)}")
-        if modified: parts.append(f"✏️ Modified: {', '.join(modified)}")
-        if removed:  parts.append(f"❌ Removed: {', '.join(removed)}")
-        text = "\n".join(parts)
-
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="📄 View Full Logs", callback_data="update:logs"),
-                    InlineKeyboardButton(text="📡 Deploy to Screen", callback_data="update:deploy"),
-                ],
-            ]
-        )
-
-        await status.edit_text(text, parse_mode="HTML", reply_markup=kb)
-    except Exception as e:
-        logger.exception("Update error")
-        await status.edit_text(f"❌ Update failed:\n<code>{html.escape(str(e))}</code>", parse_mode="HTML")
-
-@dp.callback_query(lambda c: c.data and c.data.startswith("update:"))
-async def on_update_button(query: CallbackQuery):
-    await query.answer()
-    action  = query.data.split(":", 1)[1]
-    chat_id = query.message.chat.id
-
-    if action == "logs":
-        pull_out, install_out, *_ = await run_update_process()
-        await send_logs_as_file(chat_id, pull_out, install_out)
-    elif action == "deploy":
-        await deploy_to_screen(chat_id)
-
-@dp.startup()
-async def on_startup():
-    global last_remote_sha
-    try:
-        out = subprocess.check_output(["git", "ls-remote", "origin", "HEAD"]).decode().split()
-        last_remote_sha = out[0].strip()
-    except Exception:
-        last_remote_sha = None
-    asyncio.create_task(check_for_updates())
-
-async def check_for_updates():
-    global last_remote_sha
-    while True:
-        await asyncio.sleep(UPDATE_CHECK_INTERVAL)
-        try:
-            out = subprocess.check_output(["git", "ls-remote", "origin", "HEAD"]).decode().split()
-            remote_sha = out[0].strip()
-            if last_remote_sha and remote_sha != last_remote_sha and ADMIN_CHAT_ID:
-                last_remote_sha = remote_sha
-                kb = InlineKeyboardMarkup(
-                    inline_keyboard=[[InlineKeyboardButton(text="🔄 Update Now", callback_data="update:deploy")]]
-                )
-                await bot.send_message(
-                    ADMIN_CHAT_ID,
-                    f"🆕 New update detected: <code>{remote_sha[:7]}</code>",
-                    parse_mode="HTML",
-                    reply_markup=kb
-                )
-        except Exception as e:
-            logger.error(f"Failed remote check: {e}")
-
-if __name__ == "__main__":
-    logger.info("🚀 Bot is starting…")
-    dp.run_polling(bot)
