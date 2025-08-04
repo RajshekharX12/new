@@ -87,7 +87,6 @@ async def run_update_process() -> tuple[str, str, list[str], list[str], list[str
     added    = [ln.split("\t",1)[1] for ln in diff_lines if ln.startswith("A\t")]
     modified = [ln.split("\t",1)[1] for ln in diff_lines if ln.startswith("M\t")]
     removed  = [ln.split("\t",1)[1] for ln in diff_lines if ln.startswith("D\t")]
-
     return pull_out, install_out, added, modified, removed
 
 async def deploy_to_screen(chat_id: int):
@@ -106,7 +105,6 @@ async def update_handler(message: Message):
     try:
         pull_out, install_out, added, modified, removed = await run_update_process()
 
-        # build full summary
         summary = [
             "📥 Git Pull Output:",
             "```",
@@ -135,7 +133,6 @@ async def update_handler(message: Message):
         )
 
         await status.edit_text(text, parse_mode="Markdown", reply_markup=kb)
-
     except Exception as e:
         logger.exception("Update error")
         await status.edit_text(f"❌ Update failed:\n{e}")
@@ -147,7 +144,6 @@ async def on_update_button(query: CallbackQuery):
     chat_id = query.message.chat.id
 
     if action == "run":
-        # re-run only pull & install, show both in one message
         pull_out, install_out, added, modified, removed = await run_update_process()
         parts = [
             "📥 Git Pull Output:",
@@ -169,7 +165,6 @@ async def on_update_button(query: CallbackQuery):
         await bot.send_message(chat_id, "\n".join(parts), parse_mode="Markdown")
 
     elif action == "diff":
-        # include both pull and install outputs plus the diff
         pull_out, install_out, added, modified, removed = await run_update_process()
         parts = [
             "📥 Git Pull Output:",
@@ -195,7 +190,7 @@ async def on_update_button(query: CallbackQuery):
         await deploy_to_screen(chat_id)
 
 # ─── STARTUP & BACKGROUND CHECK ───────────────────────────────────
-@dp.startup
+@dp.startup()
 async def on_startup():
     global last_remote_sha
     try:
@@ -203,8 +198,6 @@ async def on_startup():
         last_remote_sha = out[0].strip()
     except Exception:
         last_remote_sha = None
-
-    # schedule periodic remote checks
     asyncio.create_task(check_for_updates())
 
 async def check_for_updates():
