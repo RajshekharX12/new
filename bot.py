@@ -9,6 +9,7 @@ import asyncio
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command
 from aiogram.types import (
     Message,
@@ -38,8 +39,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ─── BOT & DISPATCHER ─────────────────────────────────────────────
-bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.HTML)
-dp  = Dispatcher()
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+)
+dp = Dispatcher()
 
 # ─── SAFONEAPI CLIENT ─────────────────────────────────────────────
 api = SafoneAPI()
@@ -69,6 +73,7 @@ last_remote_sha = None
 async def run_update_process() -> tuple[str, str, list[str], list[str], list[str]]:
     old_sha = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
     pull_out = subprocess.check_output(["git", "pull"], stderr=subprocess.STDOUT).decode().strip()
+
     try:
         install_out = subprocess.check_output(
             [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
@@ -104,7 +109,6 @@ async def update_handler(message: Message):
     try:
         pull_out, install_out, added, modified, removed = await run_update_process()
 
-        # Build full summary
         parts = [
             "📥 Git Pull Output:",
             "```",
@@ -123,7 +127,6 @@ async def update_handler(message: Message):
         if removed:
             parts.append(f"❌ Removed:  {', '.join(removed)}")
 
-        # Explicitly construct InlineKeyboardMarkup
         kb = InlineKeyboardMarkup(
             inline_keyboard=[
                 [
@@ -181,6 +184,7 @@ async def on_startup():
         last_remote_sha = out[0].strip()
     except Exception:
         last_remote_sha = None
+
     asyncio.create_task(check_for_updates())
 
 async def check_for_updates():
@@ -193,9 +197,7 @@ async def check_for_updates():
             if last_remote_sha and remote_sha != last_remote_sha and ADMIN_CHAT_ID:
                 last_remote_sha = remote_sha
                 kb = InlineKeyboardMarkup(
-                    inline_keyboard=[[
-                        InlineKeyboardButton("🔄 Update Now", callback_data="update:run"),
-                    ]]
+                    inline_keyboard=[[InlineKeyboardButton("🔄 Update Now", callback_data="update:run")]]
                 )
                 await bot.send_message(
                     ADMIN_CHAT_ID,
