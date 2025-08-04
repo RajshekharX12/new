@@ -17,7 +17,7 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     CallbackQuery,
-    InputFile,
+    FSInputFile,
 )
 
 from SafoneAPI import SafoneAPI
@@ -64,7 +64,7 @@ def send_logs_as_file(chat_id: int, pull_out: str, install_out: str):
     tmp.write("=== Pip Install Output ===\n")
     tmp.write(install_out + "\n")
     tmp.close()
-    return bot.send_document(chat_id, InputFile(tmp.name), caption="📄 Full update logs")
+    return bot.send_document(chat_id, FSInputFile(tmp.name), caption="📄 Full update logs")
 
 # ─── UPDATE & AUTO-DEPLOY LOGIC ──────────────────────────────────
 last_remote_sha = None
@@ -89,18 +89,30 @@ async def run_update_process() -> tuple[str, str, list[str], list[str], list[str
     added    = [ln.split("\t",1)[1] for ln in diff_lines if ln.startswith("A\t")]
     modified = [ln.split("\t",1)[1] for ln in diff_lines if ln.startswith("M\t")]
     removed  = [ln.split("\t",1)[1] for ln in diff_lines if ln.startswith("D\t")]
-
     return pull_out, install_out, added, modified, removed
 
 async def deploy_to_screen(chat_id: int):
-    cmds = [
+    # Stop existing bot
+    subprocess.call([
+        "screen", "-S", SCREEN_SESSION,
+        "-X", "stuff", "\003"  # Ctrl-C
+    ])
+    # Update and restart
+    commands = [
         f"cd {PROJECT_PATH}",
         "git pull",
         f"{sys.executable} -m pip install -r requirements.txt",
+        f"nohup python3 {os.path.join(PROJECT_PATH, 'bot.py')} &"
     ]
-    for cmd in cmds:
-        subprocess.call(["screen", "-S", SCREEN_SESSION, "-X", "stuff", cmd + "\n"])
-    await bot.send_message(chat_id, f"🚀 Deployed into screen session “{SCREEN_SESSION}”")
+    for cmd in commands:
+        subprocess.call([
+            "screen", "-S", SCREEN_SESSION,
+            "-X", "stuff", cmd + "\n"
+        ])
+    await bot.send_message(
+        chat_id,
+        f"🚀 Stopped old bot, updated code & deps, and relaunched in screen '{SCREEN_SESSION}'"
+    )
 
 @dp.message(F.text & ~F.text.startswith("/"))
 async def chatgpt_handler(message: Message):
@@ -121,7 +133,6 @@ async def update_handler(message: Message):
     try:
         pull_out, install_out, added, modified, removed = await run_update_process()
 
-        # concise summary only
         parts = ["🗂️ <b>Update Summary</b>:"]
         parts.append("• Git pull: <code>OK</code>" if "Already up to date." not in pull_out else "• Git pull: <code>No changes</code>")
         parts.append("• Dependencies: <code>Installed</code>" if "ERROR" not in install_out else "• Dependencies: <code>Error</code>")
@@ -156,7 +167,6 @@ async def on_update_button(query: CallbackQuery):
     elif action == "deploy":
         await deploy_to_screen(chat_id)
 
-# ─── STARTUP & BACKGROUND CHECK ───────────────────────────────────
 @dp.startup()
 async def on_startup():
     global last_remote_sha
@@ -177,7 +187,7 @@ async def check_for_updates():
             if last_remote_sha and remote_sha != last_remote_sha and ADMIN_CHAT_ID:
                 last_remote_sha = remote_sha
                 kb = InlineKeyboardMarkup(
-                    inline_keyboard=[[InlineKeyboardButton(text="🔄 Update Now", callback_data="update:run")]]
+                    inline_keyboard=[[InlineKeyboardButton(text="🔄 Update Now", callback_data="update:deploy")]]
                 )
                 await bot.send_message(
                     ADMIN_CHAT_ID,
@@ -188,7 +198,6 @@ async def check_for_updates():
         except Exception as e:
             logger.error(f"Failed remote check: {e}")
 
-# ─── RUN BOT ───────────────────────────────────────────────────────
 if __name__ == "__main__":
     logger.info("🚀 Bot is starting…")
     dp.run_polling(bot)
