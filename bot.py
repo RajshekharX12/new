@@ -92,26 +92,23 @@ async def run_update_process() -> tuple[str, str, list[str], list[str], list[str
     return pull_out, install_out, added, modified, removed
 
 async def deploy_to_screen(chat_id: int):
-    # Stop existing bot
-    subprocess.call([
-        "screen", "-S", SCREEN_SESSION,
-        "-X", "stuff", "\003"  # Ctrl-C
-    ])
-    # Update and restart
-    commands = [
-        f"cd {PROJECT_PATH}",
-        "git pull",
-        f"{sys.executable} -m pip install -r requirements.txt",
-        f"nohup python3 {os.path.join(PROJECT_PATH, 'bot.py')} &"
-    ]
-    for cmd in commands:
-        subprocess.call([
-            "screen", "-S", SCREEN_SESSION,
-            "-X", "stuff", cmd + "\n"
-        ])
+    """
+    Completely restart the 'meow' screen session:
+    - Kill any existing 'meow'
+    - Pull & reinstall
+    - Launch a single new detached screen running bot.py
+    """
+    # 1) Kill any existing meow sessions
+    subprocess.call(["pkill", "-f", f"SCREEN -S {SCREEN_SESSION}"])
+    # 2) Update code & deps
+    subprocess.call(["git", "pull"], cwd=PROJECT_PATH)
+    subprocess.call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], cwd=PROJECT_PATH)
+    # 3) Start fresh detached screen
+    launch_cmd = f"cd {PROJECT_PATH} && exec {sys.executable} bot.py"
+    subprocess.call(["screen", "-dmS", SCREEN_SESSION, "bash", "-c", launch_cmd])
     await bot.send_message(
         chat_id,
-        f"🚀 Stopped old bot, updated code & deps, and relaunched in screen '{SCREEN_SESSION}'"
+        f"🚀 Restarted bot in a single '{SCREEN_SESSION}' screen session."
     )
 
 @dp.message(F.text & ~F.text.startswith("/"))
