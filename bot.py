@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 # ─── BOT & DISPATCHER ─────────────────────────────────────────────
 bot = Bot(
     token=BOT_TOKEN,
-    default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN)
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
 )
 dp = Dispatcher()
 
@@ -51,30 +51,27 @@ dp = Dispatcher()
 api = SafoneAPI()
 
 # ─── PLUGINS & FALLBACK ───────────────────────────────────────────
-import fragment_url
-import speed
-import review
-import floor
+import fragment_url   # inline 888 → fragment.com URL
+import speed          # /speed VPS speedtest
+import review         # /review code quality + /help
+import floor          # /888 current floor price
 
-def send_or_file(chat_id: int, text: str, **send_kwargs):
-    """
-    If 'text' is under the 4096-char limit, send it as a message.
-    Otherwise dump to a temp file and send as a document.
-    """
-    if len(text) <= 4000:
-        return bot.send_message(chat_id, text, **send_kwargs)
-    # else, write to temp file
+# ─── HELPERS ──────────────────────────────────────────────────────
+def send_logs_as_file(chat_id: int, pull_out: str, install_out: str):
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".txt", mode="w", encoding="utf-8")
-    tmp.write(text)
+    tmp.write("=== Git Pull Output ===\n")
+    tmp.write(pull_out + "\n\n")
+    tmp.write("=== Pip Install Output ===\n")
+    tmp.write(install_out + "\n")
     tmp.close()
-    return bot.send_document(chat_id, InputFile(tmp.name), caption="📄 Update log (too long for chat)")
+    return bot.send_document(chat_id, InputFile(tmp.name), caption="📄 Full update logs")
 
 # ─── UPDATE & AUTO-DEPLOY LOGIC ──────────────────────────────────
 last_remote_sha = None
 
 async def run_update_process() -> tuple[str, str, list[str], list[str], list[str]]:
-    old_sha = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
-    pull_out = subprocess.check_output(["git", "pull"], stderr=subprocess.STDOUT).decode().strip()
+    old_sha   = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
+    pull_out  = subprocess.check_output(["git", "pull"], stderr=subprocess.STDOUT).decode().strip()
     try:
         install_out = subprocess.check_output(
             [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
@@ -82,14 +79,17 @@ async def run_update_process() -> tuple[str, str, list[str], list[str], list[str
         ).decode().strip()
     except subprocess.CalledProcessError as e:
         install_out = f"ERROR: {e.output.decode().strip()}"
-    new_sha = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
+
+    new_sha    = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
     diff_lines = subprocess.check_output(
         ["git", "diff", "--name-status", old_sha, new_sha],
         stderr=subprocess.STDOUT
     ).decode().splitlines()
+
     added    = [ln.split("\t",1)[1] for ln in diff_lines if ln.startswith("A\t")]
     modified = [ln.split("\t",1)[1] for ln in diff_lines if ln.startswith("M\t")]
     removed  = [ln.split("\t",1)[1] for ln in diff_lines if ln.startswith("D\t")]
+
     return pull_out, install_out, added, modified, removed
 
 async def deploy_to_screen(chat_id: int):
@@ -102,54 +102,47 @@ async def deploy_to_screen(chat_id: int):
         subprocess.call(["screen", "-S", SCREEN_SESSION, "-X", "stuff", cmd + "\n"])
     await bot.send_message(chat_id, f"🚀 Deployed into screen session “{SCREEN_SESSION}”")
 
+@dp.message(F.text & ~F.text.startswith("/"))
+async def chatgpt_handler(message: Message):
+    text = message.text.strip()
+    if not text:
+        return
+    try:
+        resp = await api.chatgpt(text)
+        answer = getattr(resp, "message", None) or str(resp)
+        await message.answer(html.escape(answer))
+    except Exception:
+        logger.exception("chatgpt error")
+        await message.reply("🚨 Error: SafoneAPI failed or no response.")
+
 @dp.message(Command("update"))
 async def update_handler(message: Message):
     status = await message.reply("🔄 Running update…")
     try:
         pull_out, install_out, added, modified, removed = await run_update_process()
 
-        parts = [
-            "📥 *Git Pull Output:*",
-            "```",
-            pull_out,
-            "```",
-            "📦 *Pip Install Output:*",
-            "```",
-            install_out,
-            "```",
-            "🗂️ *Changes:*"
-        ]
-        if added:
-            parts.append(f"➕ *Added:*    {', '.join(added)}")
-        if modified:
-            parts.append(f"✏️ *Modified:* {', '.join(modified)}")
-        if removed:
-            parts.append(f"❌ *Removed:*  {', '.join(removed)}")
-
+        # concise summary only
+        parts = ["🗂️ <b>Update Summary</b>:"]
+        parts.append("• Git pull: <code>OK</code>" if "Already up to date." not in pull_out else "• Git pull: <code>No changes</code>")
+        parts.append("• Dependencies: <code>Installed</code>" if "ERROR" not in install_out else "• Dependencies: <code>Error</code>")
+        if added:    parts.append(f"➕ Added: {', '.join(added)}")
+        if modified: parts.append(f"✏️ Modified: {', '.join(modified)}")
+        if removed:  parts.append(f"❌ Removed: {', '.join(removed)}")
         text = "\n".join(parts)
+
         kb = InlineKeyboardMarkup(
             inline_keyboard=[
                 [
-                    InlineKeyboardButton(text="🔄 Re-run Update", callback_data="update:run"),
-                    InlineKeyboardButton(text="📝 Show Diff",      callback_data="update:diff"),
-                ],
-                [
+                    InlineKeyboardButton(text="📄 View Full Logs", callback_data="update:logs"),
                     InlineKeyboardButton(text="📡 Deploy to Screen", callback_data="update:deploy"),
                 ],
             ]
         )
 
-        # either edit or send file
-        await send_or_file(
-            message.chat.id,
-            text,
-            parse_mode="Markdown",
-            reply_markup=kb
-        )
-
+        await status.edit_text(text, parse_mode="HTML", reply_markup=kb)
     except Exception as e:
         logger.exception("Update error")
-        await status.edit_text(f"❌ Update failed:\n{e}")
+        await status.edit_text(f"❌ Update failed:\n<code>{html.escape(str(e))}</code>", parse_mode="HTML")
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("update:"))
 async def on_update_button(query: CallbackQuery):
@@ -157,28 +150,9 @@ async def on_update_button(query: CallbackQuery):
     action  = query.data.split(":", 1)[1]
     chat_id = query.message.chat.id
 
-    if action in ("run", "diff"):
-        pull_out, install_out, added, modified, removed = await run_update_process()
-        parts = [
-            "📥 *Git Pull Output:*",
-            "```",
-            pull_out,
-            "```",
-            "📦 *Pip Install Output:*",
-            "```",
-            install_out,
-            "```",
-            "🗂️ *Changes:*"
-        ]
-        if added:
-            parts.append(f"➕ *Added:*    {', '.join(added)}")
-        if modified:
-            parts.append(f"✏️ *Modified:* {', '.join(modified)}")
-        if removed:
-            parts.append(f"❌ *Removed:*  {', '.join(removed)}")
-
-        await send_or_file(chat_id, "\n".join(parts), parse_mode="Markdown")
-
+    if action == "logs":
+        pull_out, install_out, *_ = await run_update_process()
+        await send_logs_as_file(chat_id, pull_out, install_out)
     elif action == "deploy":
         await deploy_to_screen(chat_id)
 
@@ -207,8 +181,8 @@ async def check_for_updates():
                 )
                 await bot.send_message(
                     ADMIN_CHAT_ID,
-                    f"🆕 New update detected: `{remote_sha[:7]}`",
-                    parse_mode="Markdown",
+                    f"🆕 New update detected: <code>{remote_sha[:7]}</code>",
+                    parse_mode="HTML",
                     reply_markup=kb
                 )
         except Exception as e:
