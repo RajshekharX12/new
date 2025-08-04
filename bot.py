@@ -69,7 +69,6 @@ last_remote_sha = None
 async def run_update_process() -> tuple[str, str, list[str], list[str], list[str]]:
     old_sha = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
     pull_out = subprocess.check_output(["git", "pull"], stderr=subprocess.STDOUT).decode().strip()
-
     try:
         install_out = subprocess.check_output(
             [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
@@ -105,7 +104,8 @@ async def update_handler(message: Message):
     try:
         pull_out, install_out, added, modified, removed = await run_update_process()
 
-        summary = [
+        # Build full summary
+        parts = [
             "📥 Git Pull Output:",
             "```",
             pull_out,
@@ -117,22 +117,26 @@ async def update_handler(message: Message):
             "🗂️ Changes:"
         ]
         if added:
-            summary.append(f"➕ Added:    {', '.join(added)}")
+            parts.append(f"➕ Added:    {', '.join(added)}")
         if modified:
-            summary.append(f"✏️ Modified: {', '.join(modified)}")
+            parts.append(f"✏️ Modified: {', '.join(modified)}")
         if removed:
-            summary.append(f"❌ Removed:  {', '.join(removed)}")
+            parts.append(f"❌ Removed:  {', '.join(removed)}")
 
-        text = "\n".join(summary)
-
-        kb = InlineKeyboardMarkup(row_width=2)
-        kb.add(
-            InlineKeyboardButton("🔄 Re-run Update", callback_data="update:run"),
-            InlineKeyboardButton("📝 Show Diff",     callback_data="update:diff"),
-            InlineKeyboardButton("📡 Deploy to Screen", callback_data="update:deploy"),
+        # Explicitly construct InlineKeyboardMarkup
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton("🔄 Re-run Update", callback_data="update:run"),
+                    InlineKeyboardButton("📝 Show Diff",      callback_data="update:diff"),
+                ],
+                [
+                    InlineKeyboardButton("📡 Deploy to Screen", callback_data="update:deploy"),
+                ],
+            ]
         )
 
-        await status.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+        await status.edit_text("\n".join(parts), parse_mode="Markdown", reply_markup=kb)
     except Exception as e:
         logger.exception("Update error")
         await status.edit_text(f"❌ Update failed:\n{e}")
@@ -143,28 +147,7 @@ async def on_update_button(query: CallbackQuery):
     action = query.data.split(":", 1)[1]
     chat_id = query.message.chat.id
 
-    if action == "run":
-        pull_out, install_out, added, modified, removed = await run_update_process()
-        parts = [
-            "📥 Git Pull Output:",
-            "```",
-            pull_out,
-            "```",
-            "📦 Pip Install Output:",
-            "```",
-            install_out,
-            "```",
-        ]
-        if added:
-            parts.append(f"➕ Added:    {', '.join(added)}")
-        if modified:
-            parts.append(f"✏️ Modified: {', '.join(modified)}")
-        if removed:
-            parts.append(f"❌ Removed:  {', '.join(removed)}")
-
-        await bot.send_message(chat_id, "\n".join(parts), parse_mode="Markdown")
-
-    elif action == "diff":
+    if action in ("run", "diff"):
         pull_out, install_out, added, modified, removed = await run_update_process()
         parts = [
             "📥 Git Pull Output:",
@@ -209,8 +192,10 @@ async def check_for_updates():
             remote_sha = out[0].strip()
             if last_remote_sha and remote_sha != last_remote_sha and ADMIN_CHAT_ID:
                 last_remote_sha = remote_sha
-                kb = InlineKeyboardMarkup().add(
-                    InlineKeyboardButton("🔄 Update Now", callback_data="update:run")
+                kb = InlineKeyboardMarkup(
+                    inline_keyboard=[[
+                        InlineKeyboardButton("🔄 Update Now", callback_data="update:run"),
+                    ]]
                 )
                 await bot.send_message(
                     ADMIN_CHAT_ID,
