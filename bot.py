@@ -6,7 +6,6 @@ from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart
-from aiogram.client.default import DefaultBotProperties
 
 from SafoneAPI import SafoneAPI
 
@@ -24,10 +23,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ─── BOT & DISPATCHER ──────────────────────────────────────────
-bot = Bot(
-    token=API_TOKEN,
-    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
-)
+# parse_mode is passed directly
+bot = Bot(token=API_TOKEN, parse_mode=ParseMode.HTML)
 dp = Dispatcher()
 
 # ─── PLUGINS ──────────────────────────────────────────────────
@@ -49,6 +46,7 @@ async def chatgpt_handler(message: types.Message):
     try:
         resp = await api.chatgpt(text)
         answer = getattr(resp, "message", None) or str(resp)
+        # HTML-escape just in case
         await message.answer(html.escape(answer))
     except Exception:
         logger.exception("chatgpt error")
