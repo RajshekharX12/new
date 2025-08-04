@@ -27,8 +27,8 @@ async def send_speed_via_ai(message: Message):
             f"- Download: {download_mbps:.2f} Mbps\n"
             f"- Upload:   {upload_mbps:.2f} Mbps\n"
             f"- Ping:     {ping_ms:.2f} ms\n\n"
-            "Write me a friendly, concise summary of these results and suggest what they imply "
-            "about the server's suitability for tasks like web hosting, video streaming, and real-time gaming."
+            "Write me a friendly, concise summary of these results in short with emojis and you shoud raost me  "
+            "and write few lines ."
         )
 
         # 3) Ask ChatGPT via SafoneAPI
