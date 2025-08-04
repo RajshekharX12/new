@@ -48,7 +48,7 @@ dp = Dispatcher()
 # ─── SAFONEAPI CLIENT ─────────────────────────────────────────────
 api = SafoneAPI()
 
-# ─── PLUGINS & HANDLERS ──────────────────────────────────────────
+# ─── PLUGINS & FALLBACK ───────────────────────────────────────────
 import fragment_url   # inline 888 → fragment.com URL
 import speed          # /speed VPS speedtest
 import review         # /review code quality + /help
@@ -71,8 +71,8 @@ async def chatgpt_handler(message: types.Message):
 last_remote_sha = None
 
 async def run_update_process() -> tuple[str, str, list[str], list[str], list[str]]:
-    old_sha = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
-    pull_out = subprocess.check_output(["git", "pull"], stderr=subprocess.STDOUT).decode().strip()
+    old_sha   = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
+    pull_out  = subprocess.check_output(["git", "pull"], stderr=subprocess.STDOUT).decode().strip()
 
     try:
         install_out = subprocess.check_output(
@@ -82,7 +82,7 @@ async def run_update_process() -> tuple[str, str, list[str], list[str], list[str
     except subprocess.CalledProcessError as e:
         install_out = f"ERROR: {e.output.decode().strip()}"
 
-    new_sha = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
+    new_sha   = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
     diff_lines = subprocess.check_output(
         ["git", "diff", "--name-status", old_sha, new_sha],
         stderr=subprocess.STDOUT
@@ -130,16 +130,17 @@ async def update_handler(message: Message):
         kb = InlineKeyboardMarkup(
             inline_keyboard=[
                 [
-                    InlineKeyboardButton("🔄 Re-run Update", callback_data="update:run"),
-                    InlineKeyboardButton("📝 Show Diff",      callback_data="update:diff"),
+                    InlineKeyboardButton(text="🔄 Re-run Update", callback_data="update:run"),
+                    InlineKeyboardButton(text="📝 Show Diff",      callback_data="update:diff"),
                 ],
                 [
-                    InlineKeyboardButton("📡 Deploy to Screen", callback_data="update:deploy"),
+                    InlineKeyboardButton(text="📡 Deploy to Screen", callback_data="update:deploy"),
                 ],
             ]
         )
 
         await status.edit_text("\n".join(parts), parse_mode="Markdown", reply_markup=kb)
+
     except Exception as e:
         logger.exception("Update error")
         await status.edit_text(f"❌ Update failed:\n{e}")
@@ -147,7 +148,7 @@ async def update_handler(message: Message):
 @dp.callback_query(lambda c: c.data and c.data.startswith("update:"))
 async def on_update_button(query: CallbackQuery):
     await query.answer()
-    action = query.data.split(":", 1)[1]
+    action  = query.data.split(":", 1)[1]
     chat_id = query.message.chat.id
 
     if action in ("run", "diff"):
@@ -184,7 +185,6 @@ async def on_startup():
         last_remote_sha = out[0].strip()
     except Exception:
         last_remote_sha = None
-
     asyncio.create_task(check_for_updates())
 
 async def check_for_updates():
@@ -197,7 +197,9 @@ async def check_for_updates():
             if last_remote_sha and remote_sha != last_remote_sha and ADMIN_CHAT_ID:
                 last_remote_sha = remote_sha
                 kb = InlineKeyboardMarkup(
-                    inline_keyboard=[[InlineKeyboardButton("🔄 Update Now", callback_data="update:run")]]
+                    inline_keyboard=[
+                        [InlineKeyboardButton(text="🔄 Update Now", callback_data="update:run")]
+                    ]
                 )
                 await bot.send_message(
                     ADMIN_CHAT_ID,
