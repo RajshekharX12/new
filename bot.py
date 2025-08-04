@@ -69,6 +69,7 @@ last_remote_sha = None
 async def run_update_process() -> tuple[str, str, list[str], list[str], list[str]]:
     old_sha = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
     pull_out = subprocess.check_output(["git", "pull"], stderr=subprocess.STDOUT).decode().strip()
+
     try:
         install_out = subprocess.check_output(
             [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
@@ -86,6 +87,7 @@ async def run_update_process() -> tuple[str, str, list[str], list[str], list[str
     added    = [ln.split("\t",1)[1] for ln in diff_lines if ln.startswith("A\t")]
     modified = [ln.split("\t",1)[1] for ln in diff_lines if ln.startswith("M\t")]
     removed  = [ln.split("\t",1)[1] for ln in diff_lines if ln.startswith("D\t")]
+
     return pull_out, install_out, added, modified, removed
 
 async def deploy_to_screen(chat_id: int):
@@ -103,5 +105,130 @@ async def update_handler(message: Message):
     status = await message.reply("🔄 Running update…")
     try:
         pull_out, install_out, added, modified, removed = await run_update_process()
+
+        # build full summary
         summary = [
-            f"""📥 Git Pull Output:
+            "📥 Git Pull Output:",
+            "```",
+            pull_out,
+            "```",
+            "📦 Pip Install Output:",
+            "```",
+            install_out,
+            "```",
+            "🗂️ Changes:"
+        ]
+        if added:
+            summary.append(f"➕ Added:    {', '.join(added)}")
+        if modified:
+            summary.append(f"✏️ Modified: {', '.join(modified)}")
+        if removed:
+            summary.append(f"❌ Removed:  {', '.join(removed)}")
+
+        text = "\n".join(summary)
+
+        kb = InlineKeyboardMarkup(row_width=2)
+        kb.add(
+            InlineKeyboardButton("🔄 Re-run Update", callback_data="update:run"),
+            InlineKeyboardButton("📝 Show Diff",     callback_data="update:diff"),
+            InlineKeyboardButton("📡 Deploy to Screen", callback_data="update:deploy"),
+        )
+
+        await status.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+
+    except Exception as e:
+        logger.exception("Update error")
+        await status.edit_text(f"❌ Update failed:\n{e}")
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("update:"))
+async def on_update_button(query: CallbackQuery):
+    await query.answer()
+    action = query.data.split(":", 1)[1]
+    chat_id = query.message.chat.id
+
+    if action == "run":
+        # re-run only pull & install, show both in one message
+        pull_out, install_out, added, modified, removed = await run_update_process()
+        parts = [
+            "📥 Git Pull Output:",
+            "```",
+            pull_out,
+            "```",
+            "📦 Pip Install Output:",
+            "```",
+            install_out,
+            "```",
+        ]
+        if added:
+            parts.append(f"➕ Added:    {', '.join(added)}")
+        if modified:
+            parts.append(f"✏️ Modified: {', '.join(modified)}")
+        if removed:
+            parts.append(f"❌ Removed:  {', '.join(removed)}")
+
+        await bot.send_message(chat_id, "\n".join(parts), parse_mode="Markdown")
+
+    elif action == "diff":
+        # include both pull and install outputs plus the diff
+        pull_out, install_out, added, modified, removed = await run_update_process()
+        parts = [
+            "📥 Git Pull Output:",
+            "```",
+            pull_out,
+            "```",
+            "📦 Pip Install Output:",
+            "```",
+            install_out,
+            "```",
+            "🗂️ Changes:"
+        ]
+        if added:
+            parts.append(f"➕ Added:    {', '.join(added)}")
+        if modified:
+            parts.append(f"✏️ Modified: {', '.join(modified)}")
+        if removed:
+            parts.append(f"❌ Removed:  {', '.join(removed)}")
+
+        await bot.send_message(chat_id, "\n".join(parts), parse_mode="Markdown")
+
+    elif action == "deploy":
+        await deploy_to_screen(chat_id)
+
+# ─── STARTUP & BACKGROUND CHECK ───────────────────────────────────
+@dp.startup
+async def on_startup():
+    global last_remote_sha
+    try:
+        out = subprocess.check_output(["git", "ls-remote", "origin", "HEAD"]).decode().split()
+        last_remote_sha = out[0].strip()
+    except Exception:
+        last_remote_sha = None
+
+    # schedule periodic remote checks
+    asyncio.create_task(check_for_updates())
+
+async def check_for_updates():
+    global last_remote_sha
+    while True:
+        await asyncio.sleep(UPDATE_CHECK_INTERVAL)
+        try:
+            out = subprocess.check_output(["git", "ls-remote", "origin", "HEAD"]).decode().split()
+            remote_sha = out[0].strip()
+            if last_remote_sha and remote_sha != last_remote_sha and ADMIN_CHAT_ID:
+                last_remote_sha = remote_sha
+                kb = InlineKeyboardMarkup().add(
+                    InlineKeyboardButton("🔄 Update Now", callback_data="update:run")
+                )
+                await bot.send_message(
+                    ADMIN_CHAT_ID,
+                    f"🆕 New update detected: `{remote_sha[:7]}`",
+                    parse_mode="Markdown",
+                    reply_markup=kb
+                )
+        except Exception as e:
+            logger.error(f"Failed remote check: {e}")
+
+# ─── RUN BOT ───────────────────────────────────────────────────────
+if __name__ == "__main__":
+    logger.info("🚀 Bot is starting…")
+    dp.run_polling(bot)
