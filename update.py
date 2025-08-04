@@ -62,9 +62,8 @@ async def deploy_to_screen(chat_id: int):
         f"{sys.executable} -m pip install -r requirements.txt"
     ]
     for cmd in cmds:
-        packed = cmd + "\n"
-        subprocess.call(["screen", "-S", SCREEN_SESSION, "-X", "stuff", packed])
-    await bot.send_message(chat_id, f"🚀 Deployed latest into screen session '{SCREEN_SESSION}'.")
+        subprocess.call(["screen", "-S", SCREEN_SESSION, "-X", "stuff", cmd + "\n"])
+    await bot.send_message(chat_id, f"🚀 Deployed latest into screen session '{SCREEN_SESSION}'")
 
 @dp.message(Command("update"))
 async def update_handler(message: Message):
@@ -73,12 +72,14 @@ async def update_handler(message: Message):
         pull_out, install_out, added, modified, removed = await run_update_process(message.chat.id)
         # Build summary text
         summary = [
-            f"📥 Git Pull Output:\n```
+            f"""📥 Git Pull Output:
+```
 {pull_out}
-```",
-            f"📦 Pip Install Output:\n```
+```""",
+            f"""📦 Pip Install Output:
+```
 {install_out}
-```",
+```""",
             "🗂️ Changes:",
         ]
         if added: summary.append(f"➕ Added: {', '.join(added)}")
@@ -102,13 +103,12 @@ async def update_handler(message: Message):
 @dp.callback_query(lambda c: c.data and c.data.startswith("update:"))
 async def on_update_button(query: CallbackQuery):
     await query.answer()
-    action = query.data.split(':',1)[1]
+    action = query.data.split(":",1)[1]
     chat_id = query.message.chat.id
 
     if action == "run":
         await update_handler(query.message)
     elif action == "diff":
-        # simply re-run diff
         _, _, added, modified, removed = await run_update_process(chat_id)
         parts = []
         if added: parts.append(f"➕ Added: {', '.join(added)}")
@@ -140,7 +140,6 @@ async def check_for_updates():
             remote_sha = out[0].strip()
             if last_remote_sha and remote_sha != last_remote_sha:
                 last_remote_sha = remote_sha
-                # notify admin
                 if ADMIN_CHAT_ID:
                     kb = InlineKeyboardMarkup().add(
                         InlineKeyboardButton("🔄 Update Now", callback_data="update:run")
