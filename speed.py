@@ -12,9 +12,9 @@ dp = _main.dp
 
 logger = logging.getLogger(__name__)
 
-# simple in-memory cache to avoid repeat tests
+# in-memory cache to prevent repeated long tests
 _cache = {"ts": 0, "text": None}
-CACHE_TTL = 300  # seconds
+CACHE_TTL = 300  # 5 minutes
 
 async def run_in_executor(fn, *args):
     loop = asyncio.get_running_loop()
@@ -23,21 +23,28 @@ async def run_in_executor(fn, *args):
 @dp.message(Command("speed"))
 async def send_speed(message: Message):
     now = asyncio.get_event_loop().time()
+    # Use cached result if fresh
     if _cache["text"] and now - _cache["ts"] < CACHE_TTL:
-        return await message.reply("♻️ Using cached results:\n" + _cache["text"])
+        return await message.reply("♻️ Cached results:\n" + _cache["text"])
 
     status = await message.reply("⏳ Finding best server…")
     try:
-        st = await asyncio.wait_for(run_in_executor(speedtest.Speedtest), timeout=30)
+        # 1) Instantiate Speedtest
+        st = await asyncio.wait_for(run_in_executor(speedtest.Speedtest), timeout=20)
+
+        # 2) Find best server
         await status.edit_text("🔍 Finding best server…")
         await asyncio.wait_for(run_in_executor(st.get_best_server), timeout=30)
 
+        # 3) Download test
         await status.edit_text("⬇️ Testing download speed…")
         dl = await asyncio.wait_for(run_in_executor(st.download), timeout=60)
 
+        # 4) Upload test
         await status.edit_text("⬆️ Testing upload speed…")
         ul = await asyncio.wait_for(run_in_executor(lambda: st.upload(pre_allocate=False)), timeout=60)
 
+        # 5) Compose results
         ping = st.results.ping
         text = (
             f"📶 **VPS Speed Test**\n"
@@ -45,6 +52,8 @@ async def send_speed(message: Message):
             f"• Upload:   **{ul/1_000_000:.2f} Mbps**\n"
             f"• Ping:     **{ping:.2f} ms**"
         )
+
+        # Cache and reply
         _cache.update({"ts": now, "text": text})
         await status.edit_text(text, parse_mode="Markdown")
 
