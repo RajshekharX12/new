@@ -79,103 +79,89 @@ async def check_all(message: Message):
     if not nums:
         return await message.reply("📭 No numbers saved. Use /save first.")
 
-    status = await message.reply(f"⏳ Checking {len(nums)} numbers (×3)…")
+    status = await message.reply(f"⏳ Checking {len(nums)} numbers…")
 
     sem = asyncio.Semaphore(min(len(nums), 100))
     timeout = aiohttp.ClientTimeout(total=8)
     connector = aiohttp.TCPConnector(limit_per_host=100)
 
-    # results[i] = count of "restricted" responses out of 3
-    restricted_counts = [0] * len(nums)
-
-    async def fetch_once(number: str, session: aiohttp.ClientSession) -> bool | None:
-        """Return True if restricted phrase found, False if not, None if error."""
+    async def fetch_status(number: str, session: aiohttp.ClientSession) -> bool:
+        """
+        Returns True if number is restricted (or on error),
+        False otherwise.
+        """
         url = f"https://fragment.com/phone/{number}"
         try:
             async with sem, session.get(url, timeout=timeout) as resp:
                 text = await resp.text()
                 return "This phone number is restricted on Telegram" in text
         except Exception as e:
-            logger.warning(f"Fetch failed for {number}: {e}")
-            return None
+            logger.warning(f"Error checking {number}: {e}")
+            # Treat any failure as "restricted" to ensure no escapes
+            return True
 
     async with aiohttp.ClientSession(connector=connector, headers=DEFAULT_HEADERS) as session:
-        # For each of the three rounds
-        for _ in range(3):
-            tasks = [
-                fetch_once(n, session)
-                for n in nums
-            ]
-            results = await asyncio.gather(*tasks)
-            # tally up only clear True/False (ignore None)
-            for i, res in enumerate(results):
-                if res is True:
-                    restricted_counts[i] += 1
+        results = await asyncio.gather(
+            *(fetch_status(n, session) for n in nums),
+            return_exceptions=False
+        )
 
-    # Decide final restricted: at least 2/3 True
-    final_restricted = [
-        nums[i]
-        for i, count in enumerate(restricted_counts)
-        if count >= 2
-    ]
+    # Now every saved number was checked exactly once.
+    restricted = [n for n, is_restricted in zip(nums, results) if is_restricted]
 
-    if final_restricted:
-        final_restricted.sort()
-        for chunk_start in range(0, len(final_restricted), 30):
-            chunk = final_restricted[chunk_start : chunk_start + 30]
-            lines = "\n".join(
-                f"{chunk_start + idx + 1}. 🔒 <a href='https://fragment.com/phone/{n}'>{n}</a>"
-                for idx, n in enumerate(chunk)
-            )
-            await message.reply(lines, parse_mode="HTML", disable_web_page_preview=True)
+    if restricted:
+        # Enumerate in ascending order
+        lines = "\n".join(
+            f"{idx+1}. 🔒 <a href='https://fragment.com/phone/{n}'>{n}</a>"
+            for idx, n in enumerate(restricted)
+        )
+        await message.reply(lines,
+                            parse_mode="HTML",
+                            disable_web_page_preview=True)
     else:
-        await message.reply("❌ No restricted numbers found after triple-check.")
+        await message.reply("✅ No restricted numbers found.")
 
     await status.delete()
 
 
 @dp.inline_query()
 async def inline_check(inline_query: InlineQuery):
-    # Same triple-check logic, but return as one inline article
     user = inline_query.from_user.id
     nums = _saves.get(user, [])
     if not nums:
         content = "📭 No numbers saved. Use /save first."
     else:
         sem = asyncio.Semaphore(min(len(nums), 100))
-        timeout = aiohttp.ClientTimeout(total=5)
+        timeout = aiohttp.ClientTimeout(total=8)
         connector = aiohttp.TCPConnector(limit_per_host=100)
-        restricted_counts = [0] * len(nums)
 
-        async def fetch_once(number: str, session: aiohttp.ClientSession) -> bool | None:
-            url = f"https://fragment.com/phone/{number}"
+        async def fetch_status(number: str, session: aiohttp.ClientSession) -> bool:
             try:
-                async with sem, session.get(url, timeout=timeout) as resp:
+                async with sem, session.get(f"https://fragment.com/phone/{number}", timeout=timeout) as resp:
                     text = await resp.text()
                     return "This phone number is restricted on Telegram" in text
             except:
-                return None
+                return True
 
         async with aiohttp.ClientSession(connector=connector, headers=DEFAULT_HEADERS) as session:
-            for _ in range(3):
-                res = await asyncio.gather(*(fetch_once(n, session) for n in nums))
-                for i, ok in enumerate(res):
-                    if ok is True:
-                        restricted_counts[i] += 1
+            results = await asyncio.gather(
+                *(fetch_status(n, session) for n in nums),
+                return_exceptions=False
+            )
 
-        final_restricted = [n for i, n in enumerate(nums) if restricted_counts[i] >= 2]
-        if final_restricted:
-            final_restricted.sort()
+        restricted = [n for n, is_restricted in zip(nums, results) if is_restricted]
+
+        if restricted:
             content = "\n".join(
                 f"{idx+1}. 🔒 <a href='https://fragment.com/phone/{n}'>{n}</a>"
-                for idx, n in enumerate(final_restricted)
+                for idx, n in enumerate(restricted)
             )
         else:
-            content = "❌ No restricted numbers found after triple-check."
+            content = "✅ No restricted numbers found."
 
     article = InlineQueryResultArticle(
         id="check_restricted",
-        title="Restricted Numbers (×3️⃣ checks)",
+        title="Restricted Numbers",
         input_message_content=InputTextMessageContent(content),
     )
     await inline_query.answer([article], cache_time=0)
