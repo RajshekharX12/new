@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-import os
 import sys
 import subprocess
 import logging
@@ -18,16 +16,16 @@ api = SafoneAPI()
 async def review_handler(message: Message):
     status = await message.reply("🔍 Running code review…")
     try:
-        # 1) List all Python files in the repo
+        # 1) Get all Python files
         files = subprocess.check_output(
             ["git", "ls-files", "*.py"], stderr=subprocess.STDOUT
         ).decode().splitlines()
         if not files:
             raise ValueError("No Python files found in repo.")
 
-        # 2) Build prompt with file list and emoji headings, no intros
+        # 2) Build prompt for top 5 issues and fixes with emoji headings
         prompt = (
-            "Repository files:\n"
+            "You are a concise code reviewer. The repository contains these Python files:\n"
             + "".join(f"• {f}\n" for f in files)
             + "\n"
             "🛑 Top 5 Problems\n"
@@ -37,13 +35,16 @@ async def review_handler(message: Message):
             "Do not include any other text or mention GPT or AI. Start directly with '🛑 Top 5 Problems'."
         )
 
-        # 3) Ask ChatGPT via SafoneAPI
+        # 3) Send prompt to ChatGPT via SafoneAPI
         resp = await api.chatgpt(prompt)
         review_text = getattr(resp, "message", str(resp)).strip()
 
-        # 4) Replace the loading message with the review
+        # 4) Replace the status with final review
         await status.delete()
-        await message.answer(f"📋 *Code Review*\n\n{review_text}", parse_mode="Markdown")
+        await message.answer(
+            f"📋 Code Review\n\n{review_text}",
+            parse_mode="Markdown"
+        )
 
     except Exception as e:
         logger.exception("review error")
