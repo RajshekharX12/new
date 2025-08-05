@@ -23,16 +23,16 @@ async def review_handler(message: Message):
         if not files:
             raise ValueError("No Python files found in repo.")
 
-        # 2) Build a precise prompt with emoji headings
+        # 2) Build prompt with filename-based problems and fixes
         prompt = (
             "You are a concise code reviewer. The repository contains these Python files:\n"
-            + "".join(f"• {f}\n" for f in files)
+            + "\n".join(files)
             + "\n"
             "🛑 Top 5 Problems\n"
-            "- List the five most critical issues, one per line (bullet points).\n\n"
+            "- For each of the five most critical issues, write one bullet as 'filename: issue description'.\n\n"
             "✅ Fixes\n"
-            "- For each problem above (in the same order), provide a one-line fix suggestion.\n\n"
-            "Do not include any introductory text or mention GPT or AI. Start directly with '🛑 Top 5 Problems'."
+            "- For each problem above (in the same order), give one-line fix suggestion.\n\n"
+            "Do not include any other text or intros. Start directly with '🛑 Top 5 Problems'."
         )
 
         # 3) Ask ChatGPT via SafoneAPI
