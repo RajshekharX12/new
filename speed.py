@@ -88,11 +88,11 @@ async def exec_handler(message: Message):
 
     # Summarize output via ChatGPT
     try:
-        prompt = (
-            f"Here is the output of the command `{cmd}`:\n```
+        prompt = f"""Here is the output of the command `{cmd}`:
+```
 {out}
-```\n"
-            "Provide a concise bullet-point summary (one line each) "
+```
+Provide a concise bullet-point summary (one line each) highlighting major steps or completion messages.""" "
             "highlighting major steps or completion messages."
         )
         resp = await api.chatgpt(prompt)
