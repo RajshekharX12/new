@@ -17,26 +17,29 @@ dp = _main.dp
 logger = logging.getLogger(__name__)
 api = SafoneAPI()
 
-async def run_in_executor(fn, *args):
+async def run_in_executor(fn, *args, **kwargs):
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, fn, *args)
+    return await loop.run_in_executor(None, lambda: fn(*args, **kwargs))
 
 @dp.message(Command("speed"))
 async def send_speed(message: Message):
     status = await message.reply("⏳ Running speedtest-cli…")
     try:
-        # Wrap check_output with kwargs in a zero-arg function
-        def perform():
-            return subprocess.check_output(
+        # Run speedtest-cli with --json
+        raw = await asyncio.wait_for(
+            run_in_executor(
+                subprocess.check_output,
                 ["speedtest-cli", "--json"],
                 stderr=subprocess.STDOUT,
                 text=True
-            )
-        raw = await asyncio.wait_for(run_in_executor(perform), timeout=90)
+            ),
+            timeout=90
+        )
         data = json.loads(raw)
         download = data.get("download", 0) / 1_000_000
-        upload   = data.get("upload", 0)   / 1_000_000
-        ping     = data.get("ping", 0)
+        upload = data.get("upload", 0) / 1_000_000
+        ping = data.get("ping", 0)
+
         text = (
             "📶 **VPS Speed Test**\n"
             f"• Download: **{download:.2f} Mbps**\n"
@@ -55,9 +58,10 @@ async def send_speed(message: Message):
         logger.exception("speedtest-cli failed")
         safe = html.escape(e.output or str(e))
         await status.edit_text(
-            f"⚠️ speedtest-cli error:\n```
+            f"""⚠️ speedtest-cli error:
+```
 {safe}
-```",
+```""",
             parse_mode="Markdown"
         )
     except Exception as e:
@@ -66,7 +70,7 @@ async def send_speed(message: Message):
 
 @dp.message(Command("exec"))
 async def exec_handler(message: Message):
-    """Run a shell command on the VPS and always return a short bullet summary."""
+    """Run a shell command on the VPS and return a short bullet summary."""
     status = await message.reply("⏳ Running command…")
     parts = message.text.strip().split(maxsplit=1)
     if len(parts) < 2:
@@ -82,21 +86,20 @@ async def exec_handler(message: Message):
     except subprocess.CalledProcessError as e:
         out = e.output or str(e)
 
-    # Always use ChatGPT to produce a concise bullet-point summary
+    # Summarize output via ChatGPT
     try:
         prompt = (
             f"Here is the output of the command `{cmd}`:\n```
 {out}
 ```\n"
             "Provide a concise bullet-point summary (one line each) "
-            "highlighting each major step or completion message."
+            "highlighting major steps or completion messages."
         )
         resp = await api.chatgpt(prompt)
         summary = getattr(resp, "message", str(resp)).strip()
         await status.edit_text(f"📄 Summary:\n{summary}")
     except Exception as e:
         logger.exception("exec summarization error")
-        # If summarization fails, send a safe raw dump
         safe_out = html.escape(out)
         await status.edit_text(f"```
 {safe_out}
