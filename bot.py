@@ -54,7 +54,6 @@ api = SafoneAPI()
 import fragment_url   # inline 888 → fragment.com URL
 import speed          # /speed VPS speedtest
 import review         # /review code quality + /help
-import floor          # /888 current floor price
 import fragment       # /save, /list, /checkall, inline /check handlers
 
 # ─── UPDATE HELPERS & CACHE ───────────────────────────────────────
@@ -70,7 +69,6 @@ def send_logs_as_file(chat_id: int, pull_out: str, install_out: str):
     return bot.send_document(chat_id, FSInputFile(tmp.name), caption="📄 Full update logs")
 
 async def run_update_process() -> tuple[str, str, list[str], list[str], list[str]]:
-    # 1) get SHAs and diff
     old_sha = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
     pull_out = subprocess.check_output(["git", "pull"], stderr=subprocess.STDOUT).decode().strip()
     try:
@@ -83,7 +81,8 @@ async def run_update_process() -> tuple[str, str, list[str], list[str], list[str
 
     new_sha = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
     diff_lines = subprocess.check_output(
-        ["git", "diff", "--name-status", old_sha, new_sha], stderr=subprocess.STDOUT
+        ["git", "diff", "--name-status", old_sha, new_sha],
+        stderr=subprocess.STDOUT
     ).decode().splitlines()
     added = [ln.split("\t",1)[1] for ln in diff_lines if ln.startswith("A\t")]
     modified = [ln.split("\t",1)[1] for ln in diff_lines if ln.startswith("M\t")]
@@ -91,30 +90,32 @@ async def run_update_process() -> tuple[str, str, list[str], list[str], list[str
     return pull_out, install_out, added, modified, removed
 
 async def deploy_to_screen(chat_id: int):
-    # Send Ctrl-C to stop old bot in session
-    subprocess.call(["screen", "-S", SCREEN_SESSION, "-X", "stuff", "\x03"]))
-    # Then pull, reinstall, and relaunch
+    # 1) Stop running bot in screen via Ctrl-C
+    subprocess.call(["screen", "-S", SCREEN_SESSION, "-X", "stuff", "\x03"])
+    # 2) Pull, reinstall, and restart in-place
     cmds = [
         f"cd {PROJECT_PATH}",
         "git pull",
         f"{sys.executable} -m pip install -r requirements.txt",
-        f"{sys.executable} {os.path.join(PROJECT_PATH,'bot.py')}"  
+        f"{sys.executable} {os.path.join(PROJECT_PATH, 'bot.py')}"
     ]
     for cmd in cmds:
-        subprocess.call(["screen","-S",SCREEN_SESSION,"-X","stuff", cmd+"\n"])  
-    await bot.send_message(chat_id, f"🚀 Updated and restarted in '{SCREEN_SESSION}' session.")
+        subprocess.call(["screen", "-S", SCREEN_SESSION, "-X", "stuff", cmd + "\n"])
+    await bot.send_message(
+        chat_id,
+        f"🚀 Updated and restarted in '{SCREEN_SESSION}' session."
+    )
 
-# ─── UPDATE HANDLERS ──────────────────────────────────────────────
+# ─── /update COMMAND ──────────────────────────────────────────────
 @dp.message(Command("update"))
 async def update_handler(message: Message):
     chat_id = message.chat.id
     status = await message.reply("🔄 Running update…")
     try:
         pull_out, install_out, added, modified, removed = await run_update_process()
-        # cache for logs
         update_cache[chat_id] = (pull_out, install_out)
-        # build summary
-        parts = ["🗂️ <b>Update Summary</b>: "]
+
+        parts = ["🗂️ <b>Update Summary</b>:"]
         parts.append(
             "• Git Pull: <code>No changes</code>"
             if "Already up to date." in pull_out else
@@ -131,19 +132,24 @@ async def update_handler(message: Message):
             parts.append(f"✏️ Modified: {', '.join(modified)}")
         if removed:
             parts.append(f"❌ Removed: {', '.join(removed)}")
+
         kb = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton("📄 View Full Logs", callback_data="update:logs"),
             InlineKeyboardButton("📡 Deploy to Screen", callback_data="update:deploy"),
         ]])
+
         await status.edit_text("\n".join(parts), parse_mode="HTML", reply_markup=kb)
     except Exception as e:
         logger.exception("Update error")
-        await status.edit_text(f"❌ Update failed:\n<code>{html.escape(str(e))}</code>", parse_mode="HTML")
+        await status.edit_text(
+            f"❌ Update failed:\n<code>{html.escape(str(e))}</code>",
+            parse_mode="HTML"
+        )
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("update:"))
 async def on_update_button(query: CallbackQuery):
     await query.answer()
-    action = query.data.split("\":\",1)[1]
+    action = query.data.split(":", 1)[1]
     chat_id = query.message.chat.id
     if action == "logs":
         if chat_id in update_cache:
@@ -154,14 +160,28 @@ async def on_update_button(query: CallbackQuery):
     elif action == "deploy":
         await deploy_to_screen(chat_id)
 
+# ─── CHATGPT FALLBACK ─────────────────────────────────────────────
+@dp.message(F.text & ~F.text.startswith("/"))
+async def chatgpt_handler(message: Message):
+    text = message.text.strip()
+    if not text:
+        return
+    try:
+        resp = await api.chatgpt(text)
+        answer = getattr(resp, "message", None) or str(resp)
+        await message.answer(html.escape(answer))
+    except Exception:
+        logger.exception("chatgpt error")
+        await message.reply("🚨 Error: SafoneAPI failed or no response.")
+
 # ─── STARTUP & AUTO-CHECK ─────────────────────────────────────────
-@dp.startup
+@dp.startup()
 async def on_startup():
     global last_remote_sha
     try:
-        out = subprocess.check_output(["git","ls-remote","origin","HEAD"]).decode().split()
+        out = subprocess.check_output(["git", "ls-remote", "origin", "HEAD"]).decode().split()
         last_remote_sha = out[0]
-    except:
+    except Exception:
         last_remote_sha = None
     asyncio.create_task(check_for_updates())
 
@@ -170,19 +190,21 @@ async def check_for_updates():
     while True:
         await asyncio.sleep(UPDATE_CHECK_INTERVAL)
         try:
-            out = subprocess.check_output(["git","ls-remote","origin","HEAD"]).decode().split()
+            out = subprocess.check_output(["git", "ls-remote", "origin", "HEAD"]).decode().split()
             remote_sha = out[0]
-            if last_remote_sha and remote_sha != last_remote_sha and ADMIN_CHAT_ID:
+            if last_remote_sha and remote_sha != last_remote_sha:
                 last_remote_sha = remote_sha
+                recipients = [ADMIN_CHAT_ID] if ADMIN_CHAT_ID else list(update_cache.keys())
                 kb = InlineKeyboardMarkup(inline_keyboard=[[
                     InlineKeyboardButton("🔄 Update Now", callback_data="update:deploy")
                 ]])
-                await bot.send_message(
-                    ADMIN_CHAT_ID,
-                    f"🆕 New update: <code>{remote_sha[:7]}</code>",
-                    parse_mode="HTML",
-                    reply_markup=kb
-                )
+                for cid in recipients:
+                    await bot.send_message(
+                        cid,
+                        f"🆕 New update detected: <code>{remote_sha[:7]}</code>",
+                        parse_mode="HTML",
+                        reply_markup=kb
+                    )
         except Exception as e:
             logger.error(f"Remote check failed: {e}")
 
