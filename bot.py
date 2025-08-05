@@ -134,8 +134,8 @@ async def update_handler(message: Message):
             parts.append(f"❌ Removed: {', '.join(removed)}")
 
         kb = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton("📄 View Full Logs", callback_data="update:logs"),
-            InlineKeyboardButton("📡 Deploy to Screen", callback_data="update:deploy"),
+            InlineKeyboardButton(text="📄 View Full Logs", callback_data="update:logs"),
+            InlineKeyboardButton(text="📡 Deploy to Screen", callback_data="update:deploy"),
         ]])
 
         await status.edit_text("\n".join(parts), parse_mode="HTML", reply_markup=kb)
@@ -196,7 +196,7 @@ async def check_for_updates():
                 last_remote_sha = remote_sha
                 recipients = [ADMIN_CHAT_ID] if ADMIN_CHAT_ID else list(update_cache.keys())
                 kb = InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton("🔄 Update Now", callback_data="update:deploy")
+                    InlineKeyboardButton(text="🔄 Update Now", callback_data="update:deploy")
                 ]])
                 for cid in recipients:
                     await bot.send_message(
