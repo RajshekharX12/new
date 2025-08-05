@@ -9,7 +9,7 @@ from SafoneAPI import SafoneAPI
 
 # grab dispatcher & bot from main
 _main = sys.modules["__main__"]
-dp    = _main.dp
+dp = _main.dp
 
 logger = logging.getLogger(__name__)
 api = SafoneAPI()
@@ -25,13 +25,16 @@ async def review_handler(message: Message):
         if not files:
             raise ValueError("No Python files found in repo.")
 
-        # 2) Build prompt with filename-based problems and fixes, no intros
+        # 2) Build prompt with file list and emoji headings, no intros
         prompt = (
+            "Repository files:\n"
+            + "".join(f"• {f}\n" for f in files)
+            + "\n"
             "🛑 Top 5 Problems\n"
-            "- For each of the five most critical issues, write one bullet as 'filename.py: issue description'.\n"
-            "\n"
+            "- For each of the five most critical issues, write one bullet as 'filename.py: issue description'\n\n"
             "✅ Fixes\n"
-            "- Provide a one-line fix suggestion for each problem above, in the same order.\n"
+            "- Provide a one-line fix suggestion for each problem above, in the same order.\n\n"
+            "Do not include any other text or mention GPT or AI. Start directly with '🛑 Top 5 Problems'."
         )
 
         # 3) Ask ChatGPT via SafoneAPI
@@ -40,10 +43,7 @@ async def review_handler(message: Message):
 
         # 4) Replace the loading message with the review
         await status.delete()
-        await message.answer(
-            f"📋 *Code Review*\n\n{review_text}",
-            parse_mode="Markdown"
-        )
+        await message.answer(f"📋 *Code Review*\n\n{review_text}", parse_mode="Markdown")
 
     except Exception as e:
         logger.exception("review error")
