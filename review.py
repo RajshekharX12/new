@@ -16,30 +16,30 @@ api = SafoneAPI()
 async def review_handler(message: Message):
     status = await message.reply("🔍 Running code review…")
     try:
-        # 1) Gather all tracked Python files
+        # 1) List all Python files in the repo
         files = subprocess.check_output(
             ["git", "ls-files", "*.py"], stderr=subprocess.STDOUT
         ).decode().splitlines()
         if not files:
             raise ValueError("No Python files found in repo.")
 
-        # 2) Build prompt for ChatGPT
+        # 2) Build a concise prompt
         prompt = (
-            "You are a concise code reviewer. The repository contains these Python files:\n"
+            "You are a concise code reviewer. The repo contains these Python files:\n"
             + "".join(f"• {f}\n" for f in files)
             + "\n"
-            "Provide:\n"
-            "1️⃣ *Quality Score:* (0–100%)\n"
-            "2️⃣ *Problems:* (bullet points)\n"
-            "3️⃣ *Suggestions:* (bullet points)\n"
-            "Use emojis to headline each section."
+            "Please provide:\n"
+            "## Quality Score (0–100%)\n"
+            "## Problems (one line each — bullet points)\n"
+            "## Suggestions (one line each — bullet points)\n"
+            "Use Markdown headings exactly as above, and keep each line very short."
         )
 
-        # 3) Ask ChatGPT
+        # 3) Ask ChatGPT via SafoneAPI
         resp = await api.chatgpt(prompt)
         review_text = getattr(resp, "message", str(resp)).strip()
 
-        # 4) Delete loading message & send review
+        # 4) Replace the status message with the review
         await status.delete()
         await message.answer(
             f"📋 *Code Review*\n\n{review_text}",
