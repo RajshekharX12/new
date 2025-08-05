@@ -1,60 +1,64 @@
 import sys
+import asyncio
 import logging
 import speedtest
-import urllib.error
 
 from aiogram.filters import Command
 from aiogram.types import Message
 
-from SafoneAPI import SafoneAPI
-
-# grab the dispatcher from main
+# grab dispatcher from main
 _main = sys.modules["__main__"]
 dp = _main.dp
 
 logger = logging.getLogger(__name__)
-api = SafoneAPI()
+
+# simple in-memory cache to avoid repeat tests
+_cache = {"ts": 0, "text": None}
+CACHE_TTL = 300  # seconds
+
+async def run_in_executor(fn, *args):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, fn, *args)
 
 @dp.message(Command("speed"))
-async def send_speed_via_ai(message: Message):
-    status = await message.reply("⏳ Running speed test…")
-    try:
-        # 1) Run the speed test
-        st = speedtest.Speedtest()
-        st.get_best_server()
-        download_mbps = st.download() / 1_000_000
-        upload_mbps   = st.upload(pre_allocate=False) / 1_000_000
-        ping_ms       = st.results.ping
+async def send_speed(message: Message):
+    now = asyncio.get_event_loop().time()
+    if _cache["text"] and now - _cache["ts"] < CACHE_TTL:
+        return await message.reply("♻️ Using cached results:\n" + _cache["text"])
 
-        # 2) Build the prompt
-        prompt = (
-            "I just measured a server's network performance:\n"
-            f"- Download: {download_mbps:.2f} Mbps\n"
-            f"- Upload:   {upload_mbps:.2f} Mbps\n"
-            f"- Ping:     {ping_ms:.2f} ms\n\n"
-            "Write me a friendly, concise summary of these results in short with emojis, "
-            "roast me a little, and keep it to a few lines."
+    status = await message.reply("⏳ Finding best server…")
+    try:
+        # 1) Spin up Speedtest in executor
+        st = await asyncio.wait_for(run_in_executor(speedtest.Speedtest), timeout=30)
+
+        # 2) Find best server
+        await status.edit_text("🔍 Finding best server…")
+        await asyncio.wait_for(run_in_executor(st.get_best_server), timeout=30)
+
+        # 3) Download
+        await status.edit_text("⬇️ Testing download speed…")
+        dl = await asyncio.wait_for(run_in_executor(st.download), timeout=60)
+
+        # 4) Upload
+        await status.edit_text("⬆️ Testing upload speed…")
+        ul = await asyncio.wait_for(run_in_executor(lambda: st.upload(pre_allocate=False)), timeout=60)
+
+        # 5) Gather results
+        ping = st.results.ping
+        text = (
+            f"📶 **VPS Speed Test**\n"
+            f"• Download: **{dl/1_000_000:.2f} Mbps**\n"
+            f"• Upload:   **{ul/1_000_000:.2f} Mbps**\n"
+            f"• Ping:     **{ping:.2f} ms**"
         )
 
-        # 3) Ask ChatGPT via SafoneAPI
-        try:
-            resp = await api.chatgpt(prompt)
-            summary = getattr(resp, "message", str(resp))
-        except urllib.error.HTTPError as he:
-            if he.code == 403:
-                summary = (
-                    "⚠️ AI summary unavailable (403 Forbidden).  "
-                    "Here’s your raw results:\n"
-                    f"• Download: {download_mbps:.2f} Mbps\n"
-                    f"• Upload:   {upload_mbps:.2f} Mbps\n"
-                    f"• Ping:     {ping_ms:.2f} ms"
-                )
-            else:
-                raise
+        # cache it
+        _cache.update({"ts": now, "text": text})
 
-        # 4) Edit the original message
-        await status.edit_text(summary)
+        await status.edit_text(text, parse_mode="Markdown")
 
+    except asyncio.TimeoutError:
+        await status.edit_text("❌ Speed test timed out. Please try again later.")
     except Exception as e:
-        logger.exception("Speed+AI failed")
+        logger.exception("Speed test error")
         await status.edit_text(f"⚠️ Speed test failed: {e}")
