@@ -1,3 +1,4 @@
+# bot.py
 #!/usr/bin/env python3
 import os
 import sys
@@ -133,11 +134,12 @@ async def update_handler(message: Message):
         if removed:
             parts.append(f"❌ Removed: {', '.join(removed)}")
 
-        kb = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="📄 View Full Logs", callback_data="update:logs"),
-            InlineKeyboardButton(text="📡 Deploy to Screen", callback_data="update:deploy"),
-        ]])
-
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[[
+                InlineKeyboardButton(text="📄 View Full Logs", callback_data="update:logs"),
+                InlineKeyboardButton(text="📡 Deploy to Screen", callback_data="update:deploy"),
+            ]]
+        )
         await status.edit_text("\n".join(parts), parse_mode="HTML", reply_markup=kb)
     except Exception as e:
         logger.exception("Update error")
@@ -195,9 +197,11 @@ async def check_for_updates():
             if last_remote_sha and remote_sha != last_remote_sha:
                 last_remote_sha = remote_sha
                 recipients = [ADMIN_CHAT_ID] if ADMIN_CHAT_ID else list(update_cache.keys())
-                kb = InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(text="🔄 Update Now", callback_data="update:deploy")
-                ]])
+                kb = InlineKeyboardMarkup(
+                    inline_keyboard=[[
+                        InlineKeyboardButton(text="🔄 Update Now", callback_data="update:deploy")
+                    ]]
+                )
                 for cid in recipients:
                     await bot.send_message(
                         cid,
