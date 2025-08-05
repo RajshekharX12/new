@@ -28,22 +28,16 @@ async def send_speed(message: Message):
 
     status = await message.reply("⏳ Finding best server…")
     try:
-        # 1) Spin up Speedtest in executor
         st = await asyncio.wait_for(run_in_executor(speedtest.Speedtest), timeout=30)
-
-        # 2) Find best server
         await status.edit_text("🔍 Finding best server…")
         await asyncio.wait_for(run_in_executor(st.get_best_server), timeout=30)
 
-        # 3) Download
         await status.edit_text("⬇️ Testing download speed…")
         dl = await asyncio.wait_for(run_in_executor(st.download), timeout=60)
 
-        # 4) Upload
         await status.edit_text("⬆️ Testing upload speed…")
         ul = await asyncio.wait_for(run_in_executor(lambda: st.upload(pre_allocate=False)), timeout=60)
 
-        # 5) Gather results
         ping = st.results.ping
         text = (
             f"📶 **VPS Speed Test**\n"
@@ -51,10 +45,7 @@ async def send_speed(message: Message):
             f"• Upload:   **{ul/1_000_000:.2f} Mbps**\n"
             f"• Ping:     **{ping:.2f} ms**"
         )
-
-        # cache it
         _cache.update({"ts": now, "text": text})
-
         await status.edit_text(text, parse_mode="Markdown")
 
     except asyncio.TimeoutError:
