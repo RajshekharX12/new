@@ -11,8 +11,8 @@ from aiogram.types import Message
 from SafoneAPI import SafoneAPI
 
 # grab dispatcher & bot from main
-_main = sys.modules["__main__"]
-dp = _main.dp
+_main = sys.modules.get("__main__")
+dp = getattr(_main, 'dp', None)
 
 logger = logging.getLogger(__name__)
 api = SafoneAPI()
@@ -81,26 +81,27 @@ async def exec_handler(message: Message):
 
     try:
         out = subprocess.check_output(
-            cmd, shell=True, cwd=os.getcwd(), stderr=subprocess.STDOUT, text=True
+            cmd,
+            shell=True,
+            cwd=os.getcwd(),
+            stderr=subprocess.STDOUT,
+            text=True,
         )
     except subprocess.CalledProcessError as e:
         out = e.output or str(e)
 
-    # Summarize output via ChatGPT
-    try:
-        prompt = f"""Here is the output of the command `{cmd}`:
+    # Always summarize output via ChatGPT
+    prompt = f"""Here is the output of the command `{cmd}`:
 ```
 {out}
 ```
-Provide a concise bullet-point summary (one line each) highlighting major steps or completion messages.""" "
-            "highlighting major steps or completion messages."
-        )
+Provide a concise bullet-point summary (one line each) highlighting major steps or completion messages.
+"""
+    try:
         resp = await api.chatgpt(prompt)
         summary = getattr(resp, "message", str(resp)).strip()
         await status.edit_text(f"📄 Summary:\n{summary}")
-    except Exception as e:
-        logger.exception("exec summarization error")
+    except Exception:
+        # Fallback: send raw output
         safe_out = html.escape(out)
-        await status.edit_text(f"```
-{safe_out}
-```", parse_mode="Markdown")
+        await status.edit_text(f"```\n{safe_out}\n```", parse_mode="Markdown")
