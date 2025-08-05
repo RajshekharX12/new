@@ -1,6 +1,8 @@
 # fragment.py
 import sys
 import re
+import os
+import json
 import asyncio
 import logging
 
@@ -13,21 +15,22 @@ from aiogram.types import (
     InputTextMessageContent,
 )
 
-# grab dispatcher & bot from main
-_main = sys.modules.get("__main__")
-dp    = getattr(_main, "dp", None)
+# ─── Persistence Setup ────────────────────────────────────────────
+STORAGE_PATH = os.path.join(os.getcwd(), "fragment_saves.json")
+try:
+    with open(STORAGE_PATH, encoding="utf-8") as f:
+        raw = json.load(f)
+        _saves: dict[int, list[str]] = {int(k): v for k, v in raw.items()}
+except (FileNotFoundError, json.JSONDecodeError):
+    _saves = {}
 
+def _persist():
+    with open(STORAGE_PATH, "w", encoding="utf-8") as f:
+        json.dump(_saves, f, ensure_ascii=False)
+
+# ─── Boilerplate & Globals ────────────────────────────────────────
 logger = logging.getLogger(__name__)
-
-# ─── in‐memory storage per user ────────────────────────────────────
-_saves: dict[int, list[str]] = {}       # user_id → list of raw tokens
 _MAX_SAVE = 400
-
-# ─── simple in‐memory cache for fetch results ──────────────────────
-# number → True|False|None
-_cache: dict[str, bool | None] = {}
-
-# ─── user‐agent to pretend a real browser ───────────────────────────
 _DEFAULT_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -36,29 +39,24 @@ _DEFAULT_HEADERS = {
     )
 }
 
+# grab dispatcher from main
+_main = sys.modules.get("__main__")
+dp    = getattr(_main, "dp", None)
 
 def _user_id(msg: Message) -> int:
     return msg.from_user.id
 
-
 def _canonical(tok: str) -> str:
-    # strip all non-digits
     return re.sub(r"\D", "", tok)
 
-
-def _get_cached(num: str) -> bool | None:
-    return _cache.get(num)
-
-
-def _set_cache(num: str, val: bool | None):
-    _cache[num] = val
-
-
+# ─── /save ─────────────────────────────────────────────────────────
 @dp.message(Command("save"))
 async def save_numbers(message: Message):
     parts = message.text.strip().split(maxsplit=1)
     if len(parts) < 2:
-        return await message.reply("⚠️ Usage: `/save <num1>[,| ]<num2>…`", parse_mode="Markdown")
+        return await message.reply(
+            "⚠️ Usage: `/save <num1>[,| ]<num2>…`", parse_mode="Markdown"
+        )
 
     raw_tokens = re.split(r"[,\|\s]+", parts[1])
     uid        = _user_id(message)
@@ -71,27 +69,31 @@ async def save_numbers(message: Message):
             store.append(num)
             added += 1
 
+    _persist()
     await message.reply(
         f"✅ Added {added} number{'s' if added != 1 else ''}. "
         f"Total stored: {len(store)}/{_MAX_SAVE}."
     )
 
-
+# ─── /clear & /clearall ───────────────────────────────────────────
 @dp.message(Command(commands=["clear", "clearall"]))
 async def clear_numbers(message: Message):
     uid = _user_id(message)
-    _saves.pop(uid, None)
+    if uid in _saves:
+        _saves.pop(uid)
+        _persist()
     await message.reply("🗑️ All your saved numbers have been cleared.")
 
-
+# ─── /checkall ────────────────────────────────────────────────────
 @dp.message(Command("checkall"))
 async def check_all(message: Message):
     uid  = _user_id(message)
     nums = _saves.get(uid, [])
     if not nums:
-        return await message.reply("📭 No numbers saved. Use `/save` first.", parse_mode="Markdown")
+        return await message.reply(
+            "📭 No numbers saved. Use `/save` first.", parse_mode="Markdown"
+        )
 
-    # normalize, dedupe, sort
     nums = sorted(set(_canonical(n) for n in nums))
     status = await message.reply(f"⏳ Checking {len(nums)} numbers…")
 
@@ -100,54 +102,45 @@ async def check_all(message: Message):
     conn    = aiohttp.TCPConnector(limit_per_host=100)
 
     async def fetch(num: str, session: aiohttp.ClientSession):
-        # check cache
-        cached = _get_cached(num)
-        if cached is not None:
-            return num, cached
-
         url = f"https://fragment.com/phone/{num}"
         try:
             async with sem, session.get(url, timeout=timeout) as resp:
-                html = await resp.text()
-                restricted = "This phone number is restricted on Telegram" in html
+                text = await resp.text()
+                restricted = "This phone number is restricted on Telegram" in text
         except Exception as e:
             logger.warning(f"Fetch failed for {num}: {e}")
             restricted = None
-
-        _set_cache(num, restricted)
         return num, restricted
 
     async with aiohttp.ClientSession(connector=conn, headers=_DEFAULT_HEADERS) as sess:
         results = await asyncio.gather(*(fetch(n, sess) for n in nums))
 
-    # done checking
     await status.delete()
 
-    # filter results
     restricted = [n for n, ok in results if ok]
     unknown    = [n for n, ok in results if ok is None]
 
-    # 1) send restricted, numbered globally, 30 lines per message
     if restricted:
         header = f"🔒 Restricted: {len(restricted)}/{len(nums)}\n"
-        lines = [
+        lines  = [
             f"{i}. 🔒 <a href='https://fragment.com/phone/{num}'>{num}</a>"
             for i, num in enumerate(restricted, start=1)
         ]
         for i in range(0, len(lines), 30):
             chunk = "\n".join(lines[i:i+30])
-            await message.reply(header + chunk,
-                                parse_mode="HTML",
-                                disable_web_page_preview=True)
-            header = ""  # only show header on first chunk
+            await message.reply(
+                header + chunk,
+                parse_mode="HTML",
+                disable_web_page_preview=True
+            )
+            header = ""
     else:
         await message.reply(f"✅ No restricted numbers out of {len(nums)} checked.")
 
-    # 2) report unknowns
     if unknown:
         await message.reply("⚠️ Could not verify:\n" + "\n".join(unknown))
 
-
+# ─── Inline /check ─────────────────────────────────────────────────
 @dp.inline_query()
 async def inline_check(inline_query: InlineQuery):
     uid  = inline_query.from_user.id
@@ -155,23 +148,19 @@ async def inline_check(inline_query: InlineQuery):
     if not nums:
         content = "📭 No numbers saved. Use `/save` first."
     else:
-        # same logic as above, but inline
+        nums = sorted(set(_canonical(n) for n in nums))
         sem     = asyncio.Semaphore(min(len(nums), 100))
         timeout = aiohttp.ClientTimeout(total=5)
         conn    = aiohttp.TCPConnector(limit_per_host=100)
 
         async def fetch(num: str, session: aiohttp.ClientSession):
-            cached = _get_cached(num)
-            if cached is not None:
-                return num, cached
             url = f"https://fragment.com/phone/{num}"
             try:
                 async with sem, session.get(url, timeout=timeout) as resp:
-                    html = await resp.text()
-                    restricted = "This phone number is restricted on Telegram" in html
+                    text = await resp.text()
+                    restricted = "This phone number is restricted on Telegram" in text
             except:
                 restricted = None
-            _set_cache(num, restricted)
             return num, restricted
 
         async with aiohttp.ClientSession(connector=conn, headers=_DEFAULT_HEADERS) as sess:
