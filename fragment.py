@@ -1,14 +1,19 @@
+# fragment.py
 import sys
-import requests
+import asyncio
 import logging
-from bs4 import BeautifulSoup
-
+import aiohttp
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import (
+    Message,
+    InlineQuery,
+    InlineQueryResultArticle,
+    InputTextMessageContent,
+)
 
 # grab dispatcher & bot from main
 _main = sys.modules.get("__main__")
-dp = getattr(_main, 'dp', None)
+dp = getattr(_main, "dp", None)
 
 logger = logging.getLogger(__name__)
 _saves = {}  # chat_id -> list of phone numbers
@@ -22,7 +27,6 @@ async def save_numbers(message: Message):
         return await message.reply("⚠️ Usage: `/save <number1> <number2> ...`", parse_mode="Markdown")
     chat_id = message.chat.id
     current = _saves.get(chat_id, [])
-    # append, but cap at MAX_SAVE
     for num in parts:
         if len(current) >= MAX_SAVE:
             break
@@ -43,14 +47,13 @@ async def list_numbers(message: Message):
 
 @dp.message(Command("checkall"))
 async def check_all(message: Message):
-    """Check restriction status for all saved numbers concurrently in ~5s."""
+    """Check restriction status for all saved numbers concurrently in ~5s, returns only restricted."""
     chat_id = message.chat.id
     nums = _saves.get(chat_id, [])
     if not nums:
         return await message.reply("📭 No numbers saved. Use /save first.")
     status = await message.reply(f"⏳ Checking {len(nums)} numbers…")
 
-    import aiohttp
     sem = asyncio.Semaphore(min(len(nums), 100))
     timeout = aiohttp.ClientTimeout(total=10)
     results = [None] * len(nums)
@@ -60,29 +63,21 @@ async def check_all(message: Message):
         async with sem:
             try:
                 async with session.get(url, timeout=timeout) as resp:
-                    if resp.status == 404:
-                        results[i] = (number, False)
-                    else:
-                        results[i] = (number, True)
+                    results[i] = (number, resp.status != 404)
             except Exception:
                 results[i] = (number, None)
 
     async with aiohttp.ClientSession() as session:
-        tasks = [fetch(i, num, session) for i, num in enumerate(nums)]
-        await asyncio.gather(*tasks)
+        await asyncio.gather(*(fetch(i, n, session) for i, n in enumerate(nums)))
 
-    # Prepare and send only restricted numbers
-    restricted = [num for num, ok in results if ok is True]
+    restricted = [num for num, ok in results if ok]
     if restricted:
         chunks = [restricted[i:i+30] for i in range(0, len(restricted), 30)]
         for chunk in chunks:
-            lines = "\n".join(f"✅ {num}" for num in chunk)
-            await message.reply(lines)
+            await message.reply("\n".join(f"✅ {n}" for n in chunk))
     else:
         await message.reply("❌ No restricted numbers found.")
     await status.delete()
-
-from aiogram.types import InlineQuery, InlineQueryResultArticle, InputTextMessageContent
 
 @dp.inline_query()
 async def inline_check(inline_query: InlineQuery):
@@ -92,8 +87,6 @@ async def inline_check(inline_query: InlineQuery):
     if not nums:
         content = "📭 No numbers saved. Use /save first."
     else:
-        # Perform the same concurrent check but only restricted
-        import aiohttp
         sem = asyncio.Semaphore(min(len(nums), 100))
         timeout = aiohttp.ClientTimeout(total=5)
         results = [None] * len(nums)
@@ -107,14 +100,10 @@ async def inline_check(inline_query: InlineQuery):
                         results[i] = (number, None)
             await asyncio.gather(*(fetch(i, n) for i, n in enumerate(nums)))
         restricted = [num for num, ok in results if ok]
-        if restricted:
-            content = "\n".join(f"✅ {num}" for num in restricted)
-        else:
-            content = "❌ No restricted numbers found."
+        content = "\n".join(f"✅ {n}" for n in restricted) if restricted else "❌ No restricted numbers found."
     article = InlineQueryResultArticle(
         id="check_restricted",
         title="Restricted Numbers",
         input_message_content=InputTextMessageContent(content)
     )
     await inline_query.answer([article], cache_time=0)
-
