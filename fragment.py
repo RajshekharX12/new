@@ -1,4 +1,3 @@
-# fragment.py
 import sys
 import asyncio
 import logging
@@ -47,7 +46,7 @@ async def list_numbers(message: Message):
 
 @dp.message(Command("checkall"))
 async def check_all(message: Message):
-    """Check restriction status for all saved numbers concurrently in ~5s, returns only restricted."""
+    """Check restriction status for all saved numbers concurrently in ~5s — returns only restricted."""
     chat_id = message.chat.id
     nums = _saves.get(chat_id, [])
     if not nums:
@@ -63,7 +62,8 @@ async def check_all(message: Message):
         async with sem:
             try:
                 async with session.get(url, timeout=timeout) as resp:
-                    results[i] = (number, resp.status != 404)
+                    # 404 → restricted
+                    results[i] = (number, resp.status == 404)
             except Exception:
                 results[i] = (number, None)
 
@@ -74,14 +74,15 @@ async def check_all(message: Message):
     if restricted:
         chunks = [restricted[i:i+30] for i in range(0, len(restricted), 30)]
         for chunk in chunks:
-            await message.reply("\n".join(f"✅ {n}" for n in chunk))
+            # 🔒 marks restricted numbers
+            await message.reply("\n".join(f"🔒 {n}" for n in chunk))
     else:
         await message.reply("❌ No restricted numbers found.")
     await status.delete()
 
 @dp.inline_query()
 async def inline_check(inline_query: InlineQuery):
-    """Inline handler: @bot check — returns restricted numbers only."""
+    """Inline handler: @bot check — returns only restricted numbers."""
     user_id = inline_query.from_user.id
     nums = _saves.get(user_id, [])
     if not nums:
@@ -95,15 +96,20 @@ async def inline_check(inline_query: InlineQuery):
                 async with sem:
                     try:
                         resp = await session.get(f"https://fragment.com/phone/{number}", timeout=timeout)
-                        results[i] = (number, resp.status != 404)
+                        results[i] = (number, resp.status == 404)
                     except:
                         results[i] = (number, None)
             await asyncio.gather(*(fetch(i, n) for i, n in enumerate(nums)))
+
         restricted = [num for num, ok in results if ok]
-        content = "\n".join(f"✅ {n}" for n in restricted) if restricted else "❌ No restricted numbers found."
+        if restricted:
+            content = "\n".join(f"🔒 {n}" for n in restricted)
+        else:
+            content = "❌ No restricted numbers found."
+
     article = InlineQueryResultArticle(
         id="check_restricted",
         title="Restricted Numbers",
-        input_message_content=InputTextMessageContent(content)
+        input_message_content=InputTextMessageContent(content),
     )
     await inline_query.answer([article], cache_time=0)
