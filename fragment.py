@@ -1,189 +1,265 @@
-# === Drop-in block: account registration checker for +888 / E.164 numbers ===
-# Safe to paste after your existing imports; does not modify any routers/handlers.
-from typing import List, Dict, Optional, Tuple
-import asyncio
+# fragment.py
+import sys
 import os
 import re
+import json
+import asyncio
 import logging
+from typing import List, Dict, Tuple, Optional
 
-# Optional Telethon (MTProto) import to check phone registration status via contacts.importContacts
-try:
-    from telethon import TelegramClient
-    from telethon.sessions import StringSession
-    from telethon.errors import FloodWaitError, RpcError
-    from telethon.tl.functions.contacts import ImportContactsRequest, DeleteContactsRequest
-    from telethon.tl.types import InputPhoneContact
-except Exception:  # Telethon not installed or not available
-    TelegramClient = None  # type: ignore
+import aiohttp
+from aiogram.filters import Command
+from aiogram.types import (
+    Message,
+    InlineQuery,
+    InlineQueryResultArticle,
+    InputTextMessageContent,
+)
 
-_TELETHON_CLIENT = None  # type: ignore
-_TELETHON_LOCK = asyncio.Lock()
+# ─── Grab dispatcher from main bot.py (aiogram v3) ─────────────────────────────
+_main = sys.modules["__main__"]
+dp = getattr(_main, "dp")
 
-def _normalize_phone(num: str) -> str:
-    # Keep digits/+; ensure + prefix; handle 888 numbers commonly shown without '+'
-    s = re.sub(r'[^0-9+]', '', str(num))
-    if s.startswith('+'):
-        digits = '+' + re.sub(r'\D', '', s[1:])
-    else:
-        digits = re.sub(r'\D', '', s)
-    if digits and not digits.startswith('+'):
-        if digits.startswith('888'):
-            digits = '+' + digits
-        else:
-            digits = '+' + digits
-    return digits
+logger = logging.getLogger(__name__)
 
-async def _ensure_telethon_client() -> Optional["TelegramClient"]:
-    """
-    Creates/returns a logged-in Telethon client from env:
-      MT_API_ID / MT_API_HASH and TG_STRING_SESSION
-      (or a pre-authorized file session at TELETHON_SESSION_PATH)
-    Returns None if Telethon is unavailable or not authorized.
-    """
-    global _TELETHON_CLIENT
-    if _TELETHON_CLIENT is not None:
-        return _TELETHON_CLIENT
-    if TelegramClient is None:
-        logging.warning("Telethon not installed; account connection checks will be skipped.")
-        return None
+# ─── Persistence setup ─────────────────────────────────────────────────────────
+_SAVES_FILE = os.path.join(os.getcwd(), "saves.json")
+_saves: Dict[int, List[str]] = {}  # user_id → list of canonical numbers
+_MAX_SAVE = 1000  # raised to 1000
 
-    async with _TELETHON_LOCK:
-        if _TELETHON_CLIENT is not None:
-            return _TELETHON_CLIENT
-
-        api_id = os.getenv('MT_API_ID') or os.getenv('TELEGRAM_API_ID') or os.getenv('API_ID')
-        api_hash = os.getenv('MT_API_HASH') or os.getenv('TELEGRAM_API_HASH') or os.getenv('API_HASH')
-        string_session = os.getenv('TG_STRING_SESSION') or os.getenv('TELETHON_STRING_SESSION')
-        session_path = os.getenv('TELETHON_SESSION_PATH', '.tg_session')
-
-        if not (api_id and api_hash):
-            logging.warning("MT_API_ID / MT_API_HASH not set; skipping connection checks.")
-            return None
-
+def load_saves() -> None:
+    global _saves
+    if os.path.isfile(_SAVES_FILE):
         try:
-            if string_session:
-                client = TelegramClient(StringSession(string_session), int(api_id), api_hash)
-            else:
-                client = TelegramClient(session_path, int(api_id), api_hash)
-
-            await client.connect()
-            try:
-                is_auth = await client.is_user_authorized()
-            except TypeError:
-                is_auth = client.is_user_authorized()  # type: ignore
-            if not is_auth:
-                logging.warning("Telethon session is not authorized. Provide TG_STRING_SESSION or a logged-in session file.")
-                await client.disconnect()
-                return None
-
-            _TELETHON_CLIENT = client
-            return _TELETHON_CLIENT
+            with open(_SAVES_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            _saves = {int(k): list(map(str, v)) for k, v in data.items()}
         except Exception as e:
-            logging.exception("Failed to initialize Telethon client: %s", e)
-            return None
+            logger.warning(f"Failed to load saves.json: {e}")
+            _saves = {}
 
-async def check_numbers_connected(numbers: List[str]) -> Dict[str, Optional[bool]]:
+def save_saves() -> None:
+    try:
+        with open(_SAVES_FILE, "w", encoding="utf-8") as f:
+            json.dump(_saves, f, ensure_ascii=False)
+    except Exception as e:
+        logger.warning(f"Failed to write saves.json: {e}")
+
+# load at import time
+load_saves()
+
+# ─── HTTP client defaults ──────────────────────────────────────────────────────
+_DEFAULT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/115.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+# Heuristics to detect "restricted" on fragment page
+_RESTRICT_PATTERNS = [
+    re.compile(r"\brestricted on Telegram\b", re.I),
+    re.compile(r"\bThis phone number is restricted\b", re.I),
+    re.compile(r"\bBlocked\b", re.I),
+]
+
+# ─── Helpers ───────────────────────────────────────────────────────────────────
+def _canonical(tok: str) -> str:
+    """Keep digits only."""
+    return re.sub(r"\D", "", (tok or ""))
+
+def _user_id(msg: Message) -> int:
+    return msg.from_user.id  # type: ignore[return-value]
+
+def _is_restricted_html(html: str) -> Optional[bool]:
+    """Return True if restricted, False if confidently not, None if unknown/error."""
+    if not html:
+        return None
+    for p in _RESTRICT_PATTERNS:
+        if p.search(html):
+            return True
+    # If page is reachable but no restricted markers found, treat as not restricted
+    return False
+
+async def _fetch_status(
+    session: aiohttp.ClientSession,
+    num: str,
+    sem: asyncio.Semaphore,
+    timeout_total: float,
+) -> Tuple[str, Optional[bool]]:
     """
-    Returns: dict number(str as seen in your text) -> True (connected), False (free), None (unknown).
-    Uses MTProto contacts.importContacts (requires a logged-in Telethon *user* session).
+    Returns (num, restricted):
+      True  → restricted
+      False → not restricted
+      None  → error / unknown
     """
-    sanitized: List[Tuple[str, str]] = []  # (orig, normalized)
-    seen = set()
-    for n in numbers:
-        if not n: 
+    url = f"https://fragment.com/phone/{num}"
+    try:
+        async with sem:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout_total)) as resp:
+                text = await resp.text(errors="ignore")
+                res = _is_restricted_html(text)
+                return num, res
+    except Exception as e:
+        logger.warning(f"Fetch failed for {num}: {e!r}")
+        return num, None
+
+def _chunk_sendable(lines: List[str], chunk_size: int = 30) -> List[str]:
+    return ["\n".join(lines[i : i + chunk_size]) for i in range(0, len(lines), chunk_size)]
+
+# ─── /save handler ─────────────────────────────────────────────────────────────
+@dp.message(Command("save"))
+async def save_numbers(message: Message):
+    parts = message.text.strip().split(maxsplit=1) if message.text else []
+    if len(parts) < 2:
+        return await message.reply("⚠️ Usage: `/save <num1>[,| ]<num2> …`", parse_mode="Markdown")
+
+    raw = re.split(r"[,\s]+", parts[1])
+    uid = _user_id(message)
+    store = _saves.setdefault(uid, [])
+    added = 0
+
+    for tok in raw:
+        num = _canonical(tok)
+        if not num:
             continue
-        orig = str(n).strip()
-        norm = _normalize_phone(orig)
-        if norm in seen:
-            continue
-        seen.add(norm)
-        sanitized.append((orig, norm))
+        if len(store) >= _MAX_SAVE:
+            break
+        if num not in store:
+            store.append(num)
+            added += 1
 
-    if not sanitized:
-        return {}
+    save_saves()
+    await message.reply(f"✅ Added {added} number(s). Total stored: {len(store)}/{_MAX_SAVE}.")
 
-    client = await _ensure_telethon_client()
-    if client is None:
-        return {orig: None for (orig, _norm) in sanitized}
+# ─── /clearall handler ─────────────────────────────────────────────────────────
+@dp.message(Command("clearall"))
+async def clear_numbers(message: Message):
+    uid = _user_id(message)
+    if uid in _saves:
+        _saves.pop(uid, None)
+        save_saves()
+    await message.reply("🗑️ All your saved numbers have been cleared.")
 
-    results: Dict[str, Optional[bool]] = {orig: None for (orig, _norm) in sanitized}
+# ─── /checkall handler (ONLY restricted + unknown) ─────────────────────────────
+@dp.message(Command("checkall"))
+async def check_all(message: Message):
+    uid = _user_id(message)
+    nums = _saves.get(uid, [])
+    if not nums:
+        return await message.reply("📭 No numbers saved. Use `/save` first.", parse_mode="Markdown")
 
-    CHUNK = 50  # safe batch size
-    for i in range(0, len(sanitized), CHUNK):
-        chunk = sanitized[i:i+CHUNK]
-        contacts = [InputPhoneContact(client_id=idx, phone=norm, first_name='.', last_name='')
-                    for idx, (_orig, norm) in enumerate(chunk)]
-        try:
-            resp = await client(ImportContactsRequest(contacts=contacts))
-            imported_ids = {ic.client_id for ic in getattr(resp, 'imported', [])}
-            for idx, (orig, _norm) in enumerate(chunk):
-                results[orig] = (idx in imported_ids)
-            # Clean up to avoid polluting your address book
-            try:
-                if getattr(resp, 'users', None):
-                    await client(DeleteContactsRequest(id=[u.id for u in resp.users]))
-            except Exception:
-                pass
-        except FloodWaitError as fw:
-            await asyncio.sleep(int(getattr(fw, 'seconds', 60)) + 1)
-            # retry once for this chunk
-            try:
-                resp = await client(ImportContactsRequest(contacts=contacts))
-                imported_ids = {ic.client_id for ic in getattr(resp, 'imported', [])}
-                for idx, (orig, _norm) in enumerate(chunk):
-                    results[orig] = (idx in imported_ids)
-                try:
-                    if getattr(resp, 'users', None):
-                        await client(DeleteContactsRequest(id=[u.id for u in resp.users]))
-                except Exception:
-                    pass
-            except Exception:
-                for orig, _norm in chunk:
-                    results[orig] = None
-        except RpcError:
-            for orig, _norm in chunk:
-                results[orig] = None
-        except Exception:
-            for orig, _norm in chunk:
-                results[orig] = None
+    # normalize, dedupe, sort
+    nums = sorted(set(_canonical(n) for n in nums if _canonical(n)))
+    status_msg = await message.reply(f"⏳ Checking {len(nums)} numbers…")
 
-    return results
+    concurrency = min(len(nums), 80)
+    sem = asyncio.Semaphore(concurrency)
+    timeout_total = 8.0
+    conn = aiohttp.TCPConnector(limit_per_host=concurrency, ssl=False)
 
-async def augment_numbers_block(text: str) -> str:
-    """
-    Parse a block like:
-        🔒 Restricted: 5/254
-        1. 🔒 88801457239
-        ...
-    Append: ' — ✅ Free' or ' — ❌ connected to an account' (or ' — ⚠️ unknown') to each number line.
-    Safe for both plain and HTML parse_mode.
-    """
-    if not text:
-        return text
-    lines = text.splitlines()
-    # Pull out candidate numbers per line
-    nums: List[str] = []
-    for ln in lines:
-        m = re.search(r'(\+?888\d{5,}|(?:\+?\d[\d\s\-]{6,}\d))', ln)
-        if m:
-            nums.append(m.group(1).replace(' ', '').replace('-', ''))
+    async with aiohttp.ClientSession(connector=conn, headers=_DEFAULT_HEADERS) as sess:
+        results = await asyncio.gather(
+            *(_fetch_status(sess, n, sem, timeout_total) for n in nums),
+            return_exceptions=False,
+        )
 
-    status = await check_numbers_connected(nums)
+    try:
+        await status_msg.delete()
+    except Exception:
+        pass
 
-    def decorate(ln: str) -> str:
-        m = re.search(r'(\+?888\d{5,}|(?:\+?\d[\d\s\-]{6,}\d))', ln)
-        if not m:
-            return ln
-        raw = m.group(1).replace(' ', '').replace('-', '')
-        st = status.get(raw) or status.get(raw.lstrip('+')) or status.get('+' + raw)
-        if "✅ Free" in ln or "❌" in ln or "⚠️" in ln:
-            return ln  # avoid double-tagging
-        if st is True:
-            return ln + " — ❌ connected to an account"
-        elif st is False:
-            return ln + " — ✅ Free"
-        else:
-            return ln + " — ⚠️ unknown"
+    # Partition (no "free" reporting)
+    restricted = [n for n, ok in results if ok is True]
+    unknown = [n for n, ok in results if ok is None]
 
-    return "\n".join(decorate(ln) for ln in lines)
-# === End drop-in block ===
+    total = len(nums)
+
+    # Summary without free
+    await message.reply(
+        f"📊 Done.\n"
+        f"🔒 Restricted: {len(restricted)}/{total}\n"
+        f"⚠️ Unknown: {len(unknown)}",
+        disable_web_page_preview=True,
+    )
+
+    # Send restricted list (numbered + links)
+    if restricted:
+        header = f"🔒 Restricted: {len(restricted)}/{total}\n"
+        lines = [
+            f"{i}. 🔒 <a href='https://fragment.com/phone/{num}'>{num}</a>"
+            for i, num in enumerate(restricted, start=1)
+        ]
+        for i, chunk in enumerate(_chunk_sendable(lines, 30)):
+            await message.reply(
+                (header if i == 0 else "") + chunk,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+    else:
+        await message.reply(f"✅ No restricted numbers found out of {total} checked.")
+
+    # Report unknowns
+    if unknown:
+        unk_lines = "\n".join(unknown[:100])
+        more = "" if len(unknown) <= 100 else f"\n…and {len(unknown) - 100} more."
+        await message.reply("⚠️ Could not verify:\n" + unk_lines + more)
+
+# ─── Inline @bot query (ONLY restricted + unknown) ─────────────────────────────
+@dp.inline_query()
+async def inline_check(inline_q: InlineQuery):
+    uid = inline_q.from_user.id
+    nums = _saves.get(uid, [])
+
+    if not nums:
+        article = InlineQueryResultArticle(
+            id="no_saved",
+            title="📭 No saved numbers",
+            input_message_content=InputTextMessageContent(
+                "📭 No numbers saved. Use `/save` first.", parse_mode="HTML"
+            ),
+            description="Use /save to add numbers",
+        )
+        return await inline_q.answer([article], cache_time=0, is_personal=True)
+
+    nums = sorted(set(_canonical(n) for n in nums if _canonical(n)))
+
+    concurrency = min(len(nums), 50)
+    sem = asyncio.Semaphore(concurrency)
+    timeout_total = 5.0
+    conn = aiohttp.TCPConnector(limit_per_host=concurrency, ssl=False)
+
+    async with aiohttp.ClientSession(connector=conn, headers=_DEFAULT_HEADERS) as sess:
+        results = await asyncio.gather(
+            *(_fetch_status(sess, n, sem, timeout_total) for n in nums),
+            return_exceptions=False,
+        )
+
+    restricted = [n for n, ok in results if ok is True]
+    unknown = [n for n, ok in results if ok is None]
+
+    if restricted:
+        body = "\n".join(
+            f"🔒 <a href='https://fragment.com/phone/{n}'>{n}</a>"
+            for n in restricted[:400]  # keep inline message within limits
+        )
+    else:
+        body = "✅ No restricted numbers found."
+
+    if unknown:
+        body += "\n\n⚠️ Could not verify (sample):\n" + "\n".join(unknown[:20])
+        if len(unknown) > 20:
+            body += f"\n…(+{len(unknown) - 20} more)"
+
+    title = f"🔍 Restricted: {len(restricted)} | ⚠️ Unknown: {len(unknown)}"
+
+    article = InlineQueryResultArticle(
+        id="restricted_only",
+        title=title,
+        input_message_content=InputTextMessageContent(body, parse_mode="HTML"),
+        description="Show only restricted numbers (and unknown if any)",
+    )
+    await inline_q.answer([article], cache_time=0, is_personal=True)
