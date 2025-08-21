@@ -2,10 +2,10 @@
 import os
 import sys
 import html
+import json
 import logging
-import subprocess
 import asyncio
-import tempfile
+import subprocess
 
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types, F
@@ -23,7 +23,7 @@ from aiogram.types import (
 from SafoneAPI import SafoneAPI
 
 # ─── ChatGPT toggle state ──────────────────────────────────────────
-# Maps user_id → bool (True if ChatGPT fallback is enabled)
+# Maps user_id → bool (True if ChatGPT fallback is enabled in DMs)
 chatgpt_enabled: dict[int, bool] = {}
 
 # ─── LOAD ENV & CONFIG ────────────────────────────────────────────
@@ -32,10 +32,13 @@ BOT_TOKEN             = os.getenv("BOT_TOKEN") or ""
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set in .env")
 
-SCREEN_SESSION        = os.getenv("SCREEN_SESSION", "meow")
+SCREEN_SESSION        = os.getenv("SCREEN_SESSION", "meow")  # kept for compatibility with other plugins
 ADMIN_CHAT_ID         = int(os.getenv("ADMIN_CHAT_ID", "0"))
-UPDATE_CHECK_INTERVAL = int(os.getenv("UPDATE_CHECK_INTERVAL", "3600"))
 PROJECT_PATH          = os.getenv("PROJECT_PATH", os.getcwd())
+
+# Memory settings
+MEMORY_FILE           = os.getenv("MEMORY_FILE", "memory.json")
+MAX_MEMORY            = int(os.getenv("MAX_MEMORY", "20"))  # messages kept per chat
 
 # ─── LOGGING ──────────────────────────────────────────────────────
 logging.basicConfig(
@@ -54,63 +57,78 @@ dp = Dispatcher()
 # ─── SAFONEAPI CLIENT ─────────────────────────────────────────────
 api = SafoneAPI()
 
-# ─── PLUGINS & FALLBACK ───────────────────────────────────────────
+# ─── PLUGINS (unchanged) ──────────────────────────────────────────
 import fragment_url   # inline 888 → fragment.com URL
 import speed          # /speed VPS speedtest
 import review         # /review code quality + /help
 import fragment       # /save, /list, /checkall, inline /check handlers
 
-# ─── UPDATE HELPERS & CACHE ───────────────────────────────────────
-update_cache: dict[int, tuple[str, str]] = {}
+# ─── SIMPLE PERSISTENT MEMORY (per chat) ──────────────────────────
+_memory: dict[str, list[dict]] = {}  # key: str(chat_id), value: [{"role":"user|assistant","content":str}, ...]
 
-def send_logs_as_file(chat_id: int, pull_out: str, install_out: str):
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".txt", mode="w", encoding="utf-8")
-    tmp.write("=== Git Pull Output ===\n")
-    tmp.write(pull_out + "\n\n")
-    tmp.write("=== Pip Install Output ===\n")
-    tmp.write(install_out + "\n")
-    tmp.close()
-    return bot.send_document(chat_id, FSInputFile(tmp.name), caption="📄 Full update logs")
-
-async def run_update_process() -> tuple[str, str, list[str], list[str], list[str]]:
-    old_sha = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
-    pull_out = subprocess.check_output(["git", "pull"], stderr=subprocess.STDOUT).decode().strip()
+def _load_memory():
+    global _memory
     try:
-        install_out = subprocess.check_output(
-            [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
-            stderr=subprocess.STDOUT
-        ).decode().strip()
-    except subprocess.CalledProcessError as e:
-        install_out = f"ERROR: {e.output.decode().strip()}"
+        with open(MEMORY_FILE, "r", encoding="utf-8") as f:
+            _memory = json.load(f)
+    except Exception:
+        _memory = {}
 
-    new_sha = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
-    diff_lines = subprocess.check_output(
-        ["git", "diff", "--name-status", old_sha, new_sha],
-        stderr=subprocess.STDOUT
-    ).decode().splitlines()
-    added    = [ln.split("\t",1)[1] for ln in diff_lines if ln.startswith("A\t")]
-    modified = [ln.split("\t",1)[1] for ln in diff_lines if ln.startswith("M\t")]
-    removed  = [ln.split("\t",1)[1] for ln in diff_lines if ln.startswith("D\t")]
-    return pull_out, install_out, added, modified, removed
+def _save_memory():
+    try:
+        with open(MEMORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(_memory, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"Failed saving memory: {e}")
 
-async def deploy_to_screen(chat_id: int):
-    # stop old bot
-    subprocess.call(["screen", "-S", SCREEN_SESSION, "-X", "stuff", "\x03"])
-    # pull, reinstall, restart
-    cmds = [
-        f"cd {PROJECT_PATH}",
-        "git pull",
-        f"{sys.executable} -m pip install -r requirements.txt",
-        f"{sys.executable} {os.path.join(PROJECT_PATH, 'bot.py')}"
-    ]
-    for cmd in cmds:
-        subprocess.call(["screen", "-S", SCREEN_SESSION, "-X", "stuff", cmd + "\n"])
-    await bot.send_message(
-        chat_id,
-        f"🚀 Updated and restarted in session “{SCREEN_SESSION}”."
+def _append_memory(chat_id: int, role: str, content: str):
+    key = str(chat_id)
+    _memory.setdefault(key, [])
+    _memory[key].append({"role": role, "content": content.strip()})
+    # trim
+    if len(_memory[key]) > MAX_MEMORY:
+        _memory[key] = _memory[key][-MAX_MEMORY:]
+    _save_memory()
+
+def _build_context(chat_id: int, user_text: str) -> str:
+    """Build a single prompt string with short context so SafoneAPI can 'remember'."""
+    msgs = _memory.get(str(chat_id), [])[-(MAX_MEMORY - 1):]
+    ctx_lines = []
+    for m in msgs:
+        r = m.get("role","user")
+        c = m.get("content","").replace("\n", " ").strip()
+        if not c:
+            continue
+        ctx_lines.append(f"{r.title()}: {c}")
+    ctx = "\n".join(ctx_lines)
+    guidelines = (
+        "Guidelines: Reply briefly, be friendly, and sprinkle a few relevant emojis naturally. "
+        "If the user asks for code or commands, give them clean and minimal. Avoid markdown headings like '##'; "
+        "prefer clear lines with emojis instead."
     )
+    prompt = f"{('Previous conversation:\\n' + ctx + '\\n\\n') if ctx else ''}User: {user_text}\n\n{guidelines}"
+    return prompt
 
-# ─── /act & /actnot Commands ────────────────────────────────────────
+def _emojify(text: str) -> str:
+    """Make responses feel more lively with emojis and convert '##' style headers to emoji bullets."""
+    lines = text.splitlines()
+    out = []
+    for ln in lines:
+        s = ln.strip()
+        if s.startswith("##"):
+            # turn markdown heading into emoji bullet
+            s = "✨ " + s.lstrip("#").strip()
+        elif s.startswith("* ") or s.startswith("- "):
+            s = "• " + s[2:].strip() + " 🔹"
+        out.append(s)
+    result = "\n".join(out).strip()
+
+    # If there are zero emojis at all, add a soft footer emoji.
+    if not any(ch in result for ch in "😀😁😂🤣😊😍😘😎🤔🙌👍🔥✨💡✅⚡️🎯💻📌📎🛠️🧠🔧🔗📝🔒🚀"):
+        result = (result + "\n\n✨").strip()
+    return result
+
+# ─── /act & /actnot Commands (unchanged behavior for DMs) ─────────
 @dp.message(Command("act"))
 async def activate_chatgpt(message: Message):
     if message.chat.type != "private":
@@ -127,65 +145,7 @@ async def deactivate_chatgpt(message: Message):
     chatgpt_enabled[uid] = False
     await message.reply("❌ ChatGPT fallback is now OFF for your DMs.")
 
-# ─── /update COMMAND ──────────────────────────────────────────────
-@dp.message(Command("update"))
-async def update_handler(message: Message):
-    chat_id = message.chat.id
-    status  = await message.reply("🔄 Running update…")
-    try:
-        pull_out, install_out, added, modified, removed = await run_update_process()
-        update_cache[chat_id] = (pull_out, install_out)
-
-        parts = ["🗂️ <b>Update Summary</b>:"]
-        parts.append(
-            "• Git Pull: <code>No changes</code>"
-            if "Already up to date." in pull_out else
-            "• Git Pull: <code>OK</code>"
-        )
-        parts.append(
-            "• Dependencies: <code>Error</code>"
-            if install_out.startswith("ERROR:") else
-            "• Dependencies: <code>Installed</code>"
-        )
-        if added:
-            parts.append(f"➕ Added: {', '.join(added)}")
-        if modified:
-            parts.append(f"✏️ Modified: {', '.join(modified)}")
-        if removed:
-            parts.append(f"❌ Removed: {', '.join(removed)}")
-
-        kb = InlineKeyboardMarkup(
-            keyboard=[[
-                InlineKeyboardButton("📄 View Full Logs", callback_data="update:logs"),
-                InlineKeyboardButton("📡 Deploy to Screen", callback_data="update:deploy"),
-            ]]
-        )
-        await status.edit_text("\n".join(parts), parse_mode="HTML", reply_markup=kb)
-
-    except Exception as e:
-        logger.exception("Update error")
-        await status.edit_text(
-            f"❌ Update failed:\n<code>{html.escape(str(e))}</code>",
-            parse_mode="HTML"
-        )
-
-@dp.callback_query(lambda c: c.data and c.data.startswith("update:"))
-async def on_update_button(query: CallbackQuery):
-    await query.answer()
-    action  = query.data.split(":",1)[1]
-    chat_id = query.message.chat.id
-
-    if action == "logs":
-        if chat_id in update_cache:
-            po, io = update_cache[chat_id]
-            await send_logs_as_file(chat_id, po, io)
-        else:
-            await query.answer("No logs stored.", show_alert=True)
-
-    elif action == "deploy":
-        await deploy_to_screen(chat_id)
-
-# ─── ChatGPT Fallback ─────────────────────────────────────────────
+# ─── ChatGPT Fallback (DMs) with memory + emojis ──────────────────
 @dp.message(F.text & ~F.text.startswith("/"))
 async def chatgpt_handler(message: Message):
     # only in private when /act has been used
@@ -194,53 +154,85 @@ async def chatgpt_handler(message: Message):
     if not chatgpt_enabled.get(message.from_user.id, False):
         return
 
-    text = message.text.strip()
+    text = (message.text or "").strip()
     if not text:
         return
 
     try:
-        resp   = await api.chatgpt(text)
+        _append_memory(message.chat.id, "user", text)
+        prompt = _build_context(message.chat.id, text)
+        resp   = await api.chatgpt(prompt)
         answer = getattr(resp, "message", None) or str(resp)
+        answer = _emojify(answer)
+        _append_memory(message.chat.id, "assistant", answer)
         await message.answer(html.escape(answer))
     except Exception:
         logger.exception("chatgpt error")
         await message.reply("🚨 SafoneAPI failed or no response.")
 
-# ─── STARTUP & REMOTE‐CHECK ────────────────────────────────────────
-last_remote_sha: str | None = None
+# ─── Group/Supergroup handler: mention-or-reply to talk ───────────
+BOT_USERNAME = None
+BOT_ID = None
 
+def _is_addressed_to_bot(msg: Message) -> bool:
+    try:
+        if msg.chat.type not in ("group", "supergroup"):
+            return False
+        text = (msg.text or "")
+        mentioned = False
+        if BOT_USERNAME and ("@" + BOT_USERNAME.lower()) in text.lower():
+            mentioned = True
+        replied = bool(msg.reply_to_message and msg.reply_to_message.from_user and msg.reply_to_message.from_user.id == BOT_ID)
+        # also allow a simple prefix "!"
+        prefixed = text.strip().startswith("!")
+        return mentioned or replied or prefixed
+    except Exception:
+        return False
+
+def _strip_bot_mention(text: str) -> str:
+    if not text:
+        return text
+    if BOT_USERNAME:
+        text = text.replace(f"@{BOT_USERNAME}", "", 1)
+        text = text.replace(f"@{BOT_USERNAME.lower()}", "", 1)
+    if text.strip().startswith("!"):
+        text = text.strip()[1:].lstrip()
+    return text.strip()
+
+@dp.message(F.text & ((F.chat.type == "group") | (F.chat.type == "supergroup")))
+async def group_chatgpt_handler(message: Message):
+    if not _is_addressed_to_bot(message):
+        # still remember the chat lightly (as user context), but only short messages to avoid noise
+        txt = (message.text or "").strip()
+        if txt and len(txt) <= 200:
+            _append_memory(message.chat.id, "user", f"[group context] {txt}")
+        return
+
+    text = _strip_bot_mention(message.text or "")
+    if not text:
+        return
+
+    try:
+        _append_memory(message.chat.id, "user", text)
+        prompt = _build_context(message.chat.id, text)
+        resp   = await api.chatgpt(prompt)
+        answer = getattr(resp, "message", None) or str(resp)
+        answer = _emojify(answer)
+        _append_memory(message.chat.id, "assistant", answer)
+        await message.reply(html.escape(answer))
+    except Exception as e:
+        logger.exception(f"group chatgpt error: {e}")
+        await message.reply("⚠️ Couldn't get a reply right now.")
+
+# ─── STARTUP ───────────────────────────────────────────────────────
 @dp.startup()
 async def on_startup():
-    global last_remote_sha
-    try:
-        out = subprocess.check_output(["git","ls-remote","origin","HEAD"]).decode().split()
-        last_remote_sha = out[0]
-    except Exception:
-        last_remote_sha = None
-    asyncio.create_task(check_for_updates())
-
-async def check_for_updates():
-    global last_remote_sha
-    while True:
-        await asyncio.sleep(UPDATE_CHECK_INTERVAL)
-        try:
-            out = subprocess.check_output(["git","ls-remote","origin","HEAD"]).decode().split()
-            remote_sha = out[0]
-            if last_remote_sha and remote_sha != last_remote_sha:
-                last_remote_sha = remote_sha
-                recipients = [ADMIN_CHAT_ID] if ADMIN_CHAT_ID else list(update_cache.keys())
-                kb = InlineKeyboardMarkup(
-                    keyboard=[[InlineKeyboardButton("🔄 Update Now", callback_data="update:deploy")]]
-                )
-                for cid in recipients:
-                    await bot.send_message(
-                        cid,
-                        f"🆕 New update detected: <code>{remote_sha[:7]}</code>",
-                        parse_mode="HTML",
-                        reply_markup=kb
-                    )
-        except Exception as e:
-            logger.error(f"Remote check failed: {e}")
+    global BOT_USERNAME, BOT_ID
+    _load_memory()
+    me = await bot.get_me()
+    BOT_USERNAME = (me.username or "").strip()
+    BOT_ID = me.id
+    logger.info(f"🤖 @{BOT_USERNAME} (id={BOT_ID}) is up. Memory file: {MEMORY_FILE}")
 
 # ─── RUN ───────────────────────────────────────────────────────────
 if __name__ == "__main__":
