@@ -6,3 +6,8 @@ requests>=2.0
 # Selenium and driver manager
 selenium>=4.0.0
 webdriver-manager>=3.8.0
+aiogram == 3.14.0
+beanie == 1.26.0
+pydantic_settings == 2.4.0
+telegram_bot_logger == 0.0.3.post0
+pyyaml == 6.0.2
