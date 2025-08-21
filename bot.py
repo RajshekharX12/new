@@ -48,7 +48,6 @@ api = SafoneAPI()
 # ─── PLUGINS (unchanged) ──────────────────────────────────────────
 import fragment_url   # inline 888 → fragment.com URL
 import speed          # /speed VPS speedtest
-import review         # /review code quality + /help
 import fragment       # /save, /list, /checkall, inline /check handlers
 
 # ─── SIMPLE PERSISTENT MEMORY (per chat) ──────────────────────────
