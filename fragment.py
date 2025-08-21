@@ -1,272 +1,189 @@
-#!/usr/bin/env python3
-# bot.py — merged main.py + fragment.py (aiogram 3.14 compatible)
+# === Drop-in block: account registration checker for +888 / E.164 numbers ===
+# Safe to paste after your existing imports; does not modify any routers/handlers.
+from typing import List, Dict, Optional, Tuple
 import asyncio
-import logging
 import os
 import re
-from dataclasses import dataclass
-from typing import Dict, List, Optional
+import logging
 
-import aiohttp
-from aiogram import Bot, Dispatcher, Router, F
-from aiogram.enums import ParseMode
-from aiogram.client.default import DefaultBotProperties
-from aiogram.filters import Command
-from aiogram.types import Message
+# Optional Telethon (MTProto) import to check phone registration status via contacts.importContacts
+try:
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
+    from telethon.errors import FloodWaitError, RpcError
+    from telethon.tl.functions.contacts import ImportContactsRequest, DeleteContactsRequest
+    from telethon.tl.types import InputPhoneContact
+except Exception:  # Telethon not installed or not available
+    TelegramClient = None  # type: ignore
 
-# ============================== CONFIG ==============================
+_TELETHON_CLIENT = None  # type: ignore
+_TELETHON_LOCK = asyncio.Lock()
 
-def _env(name: str, default: str = "") -> str:
-    return os.getenv(name, default).strip()
+def _normalize_phone(num: str) -> str:
+    # Keep digits/+; ensure + prefix; handle 888 numbers commonly shown without '+'
+    s = re.sub(r'[^0-9+]', '', str(num))
+    if s.startswith('+'):
+        digits = '+' + re.sub(r'\D', '', s[1:])
+    else:
+        digits = re.sub(r'\D', '', s)
+    if digits and not digits.startswith('+'):
+        if digits.startswith('888'):
+            digits = '+' + digits
+        else:
+            digits = '+' + digits
+    return digits
 
-BOT_TOKEN = _env("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is required in environment")
-
-# Optional Fragment cookies/tokens for richer responses
-FRAGMENT_HASH        = _env("FRAGMENT_HASH")
-FRAGMENT_STEL_SSID   = _env("FRAGMENT_STEL_SSID")
-FRAGMENT_STEL_TON    = _env("FRAGMENT_STEL_TON_TOKEN")
-FRAGMENT_STEL_TOKEN  = _env("FRAGMENT_STEL_TOKEN")
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s"
-)
-logger = logging.getLogger("bot")
-
-# ========================== FRAGMENT CLIENT =========================
-
-@dataclass
-class FragmentCredentials:
-    hash: str = ""
-    stel_ssid: str = ""
-    stel_ton_token: str = ""
-    stel_token: str = ""
-
-class FragmentAPI:
-    def __init__(self, creds: FragmentCredentials):
-        self.creds = creds
-
-    def _cookie_jar(self) -> aiohttp.CookieJar:
-        jar = aiohttp.CookieJar()
-        if self.creds.stel_ssid:
-            jar.update_cookies({"stel_ssid": self.creds.stel_ssid})
-        if self.creds.stel_ton_token:
-            jar.update_cookies({"stel_ton_token": self.creds.stel_ton_token})
-        if self.creds.stel_token:
-            jar.update_cookies({"stel_token": self.creds.stel_token})
-        if self.creds.hash:
-            jar.update_cookies({"hash": self.creds.hash})
-        return jar
-
-    async def is_number_connected(self, session: aiohttp.ClientSession, num: str) -> Optional[bool]:
-        """
-        Returns:
-            True  -> connected to a Telegram account
-            False -> free (not connected)
-            None  -> unknown (couldn't determine)
-        Strategy: Fetch the number page and look for keywords / JSON state.
-        """
-        url = f"https://fragment.com/number/{num}"
-        try:
-            async with session.get(url, timeout=15) as resp:
-                txt = await resp.text()
-        except Exception as e:
-            logger.warning("Fetch failed for %s: %s", num, e)
-            return None
-
-        lower = txt.lower()
-        # Phrase heuristics
-        if "connected to a telegram account" in lower or "already linked" in lower or "busy" in lower:
-            return True
-        if "free" in lower or "available" in lower or "not connected" in lower:
-            return False
-
-        # Try to parse Next.js dehydrated state quickly (without JSON parsing deps)
-        m = re.search(r'__NEXT_DATA__"\s*type="application/json">\s*({.*?})\s*<', txt, re.S)
-        if m:
-            blob = m.group(1)
-            if '"busy":true' in blob or '"status":"busy"' in blob:
-                return True
-            if '"busy":false' in blob or '"status":"free"' in blob:
-                return False
-
+async def _ensure_telethon_client() -> Optional["TelegramClient"]:
+    """
+    Creates/returns a logged-in Telethon client from env:
+      MT_API_ID / MT_API_HASH and TG_STRING_SESSION
+      (or a pre-authorized file session at TELETHON_SESSION_PATH)
+    Returns None if Telethon is unavailable or not authorized.
+    """
+    global _TELETHON_CLIENT
+    if _TELETHON_CLIENT is not None:
+        return _TELETHON_CLIENT
+    if TelegramClient is None:
+        logging.warning("Telethon not installed; account connection checks will be skipped.")
         return None
 
-_fragment_api: Optional[FragmentAPI] = None
+    async with _TELETHON_LOCK:
+        if _TELETHON_CLIENT is not None:
+            return _TELETHON_CLIENT
 
-def init_fragment_api() -> None:
-    global _fragment_api
-    creds = FragmentCredentials(
-        hash=FRAGMENT_HASH,
-        stel_ssid=FRAGMENT_STEL_SSID,
-        stel_ton_token=FRAGMENT_STEL_TON,
-        stel_token=FRAGMENT_STEL_TOKEN
-    )
-    _fragment_api = FragmentAPI(creds)
-    has_cookies = any([FRAGMENT_HASH, FRAGMENT_STEL_SSID, FRAGMENT_STEL_TON, FRAGMENT_STEL_TOKEN])
-    logger.info("Fragment API initialized (cookies=%s)", "yes" if has_cookies else "no")
+        api_id = os.getenv('MT_API_ID') or os.getenv('TELEGRAM_API_ID') or os.getenv('API_ID')
+        api_hash = os.getenv('MT_API_HASH') or os.getenv('TELEGRAM_API_HASH') or os.getenv('API_HASH')
+        string_session = os.getenv('TG_STRING_SESSION') or os.getenv('TELETHON_STRING_SESSION')
+        session_path = os.getenv('TELETHON_SESSION_PATH', '.tg_session')
 
-# ============================ HELPERS ==============================
+        if not (api_id and api_hash):
+            logging.warning("MT_API_ID / MT_API_HASH not set; skipping connection checks.")
+            return None
 
-_digits = re.compile(r'\D+')
+        try:
+            if string_session:
+                client = TelegramClient(StringSession(string_session), int(api_id), api_hash)
+            else:
+                client = TelegramClient(session_path, int(api_id), api_hash)
 
-def _canonical(num: str) -> str:
-    """Keep digits only and ensure 888 prefix."""
-    s = _digits.sub("", num or "")
-    if not s:
-        return s
-    if not s.startswith("888"):
-        s = "888" + s
-    return s
-
-def _fmt_list_with_status(nums: List[str], statuses: Dict[str, Optional[bool]], total: Optional[int]) -> str:
-    lines: List[str] = []
-    count = len(nums)
-    header_total = total if (total and total >= count) else count
-    lines.append(f"🔒 Restricted: {count}/{header_total}")
-    for idx, n in enumerate(nums, 1):
-        st = statuses.get(n)
-        if st is True:
-            tag = "❌ connected to an account"
-        elif st is False:
-            tag = "✅ Free"
-        else:
-            tag = "⚠️ Unknown"
-        lines.append(f"{idx}. 🔒 {n} — {tag}")
-    return "\n".join(lines)
-
-async def _bulk_check_connected(nums: List[str]) -> Dict[str, Optional[bool]]:
-    """
-    Query Fragment for each number concurrently.
-    Returns a mapping num -> True/False/None.
-    """
-    out: Dict[str, Optional[bool]] = {}
-    if not nums:
-        return out
-
-    if _fragment_api is None:
-        init_fragment_api()
-
-    jar = _fragment_api._cookie_jar() if _fragment_api else aiohttp.CookieJar()
-    connector = aiohttp.TCPConnector(limit=20)  # concurrency cap
-    timeout = aiohttp.ClientTimeout(total=30)
-    async with aiohttp.ClientSession(
-        cookie_jar=jar,
-        timeout=timeout,
-        connector=connector,
-        headers={"User-Agent": "Mozilla/5.0 (compatible; NFTCheckerBot/1.0)"}
-    ) as session:
-        sem = asyncio.Semaphore(10)
-
-        async def one(n: str):
-            c = _canonical(n)
-            if not c:
-                out[n] = None
-                return
+            await client.connect()
             try:
-                async with sem:
-                    res = await _fragment_api.is_number_connected(session, c)  # type: ignore[union-attr]
-                out[c] = res
-            except Exception as e:
-                logger.warning("check failed for %s: %s", c, e)
-                out[c] = None
+                is_auth = await client.is_user_authorized()
+            except TypeError:
+                is_auth = client.is_user_authorized()  # type: ignore
+            if not is_auth:
+                logging.warning("Telethon session is not authorized. Provide TG_STRING_SESSION or a logged-in session file.")
+                await client.disconnect()
+                return None
 
-        await asyncio.gather(*(one(n) for n in nums))
+            _TELETHON_CLIENT = client
+            return _TELETHON_CLIENT
+        except Exception as e:
+            logging.exception("Failed to initialize Telethon client: %s", e)
+            return None
 
-    return out
-
-# ============================ STATE ================================
-
-router = Router()
-_saved_numbers: Dict[int, List[str]] = {}
-_last_restricted_total: Dict[int, int] = {}
-
-# ============================ COMMANDS =============================
-
-@router.message(Command("save"))
-async def cmd_save(message: Message):
+async def check_numbers_connected(numbers: List[str]) -> Dict[str, Optional[bool]]:
     """
-    /save 88801234567 12345 88800001111
-    Saves numbers for the user (canonicalizes to 888 prefix).
+    Returns: dict number(str as seen in your text) -> True (connected), False (free), None (unknown).
+    Uses MTProto contacts.importContacts (requires a logged-in Telethon *user* session).
     """
-    parts = (message.text or "").split()
-    given = parts[1:]
-    if not given:
-        return await message.reply("Usage: <code>/save 88801234567 12345 ...</code>")
+    sanitized: List[Tuple[str, str]] = []  # (orig, normalized)
+    seen = set()
+    for n in numbers:
+        if not n: 
+            continue
+        orig = str(n).strip()
+        norm = _normalize_phone(orig)
+        if norm in seen:
+            continue
+        seen.add(norm)
+        sanitized.append((orig, norm))
 
-    uid = message.from_user.id
-    have = _saved_numbers.setdefault(uid, [])
-    added = 0
-    for p in given:
-        c = _canonical(p)
-        if c and c not in have:
-            have.append(c)
-            added += 1
-    have.sort()
-    await message.reply(f"Saved {added} number(s). Total now: <b>{len(have)}</b>.")
+    if not sanitized:
+        return {}
 
-@router.message(Command("list"))
-async def cmd_list(message: Message):
-    uid = message.from_user.id
-    nums = _saved_numbers.get(uid, [])
-    if not nums:
-        return await message.reply("No numbers saved yet.")
-    body = "\n".join(f"{i+1}. {n}" for i, n in enumerate(nums))
-    await message.reply(f"<b>Saved numbers ({len(nums)}):</b>\n{body}")
+    client = await _ensure_telethon_client()
+    if client is None:
+        return {orig: None for (orig, _norm) in sanitized}
 
-@router.message(Command("clear"))
-async def cmd_clear(message: Message):
-    uid = message.from_user.id
-    _saved_numbers.pop(uid, None)
-    _last_restricted_total.pop(uid, None)
-    await message.reply("Cleared your saved numbers.")
+    results: Dict[str, Optional[bool]] = {orig: None for (orig, _norm) in sanitized}
 
-@router.message(Command("checkall"))
-async def cmd_checkall(message: Message):
+    CHUNK = 50  # safe batch size
+    for i in range(0, len(sanitized), CHUNK):
+        chunk = sanitized[i:i+CHUNK]
+        contacts = [InputPhoneContact(client_id=idx, phone=norm, first_name='.', last_name='')
+                    for idx, (_orig, norm) in enumerate(chunk)]
+        try:
+            resp = await client(ImportContactsRequest(contacts=contacts))
+            imported_ids = {ic.client_id for ic in getattr(resp, 'imported', [])}
+            for idx, (orig, _norm) in enumerate(chunk):
+                results[orig] = (idx in imported_ids)
+            # Clean up to avoid polluting your address book
+            try:
+                if getattr(resp, 'users', None):
+                    await client(DeleteContactsRequest(id=[u.id for u in resp.users]))
+            except Exception:
+                pass
+        except FloodWaitError as fw:
+            await asyncio.sleep(int(getattr(fw, 'seconds', 60)) + 1)
+            # retry once for this chunk
+            try:
+                resp = await client(ImportContactsRequest(contacts=contacts))
+                imported_ids = {ic.client_id for ic in getattr(resp, 'imported', [])}
+                for idx, (orig, _norm) in enumerate(chunk):
+                    results[orig] = (idx in imported_ids)
+                try:
+                    if getattr(resp, 'users', None):
+                        await client(DeleteContactsRequest(id=[u.id for u in resp.users]))
+                except Exception:
+                    pass
+            except Exception:
+                for orig, _norm in chunk:
+                    results[orig] = None
+        except RpcError:
+            for orig, _norm in chunk:
+                results[orig] = None
+        except Exception:
+            for orig, _norm in chunk:
+                results[orig] = None
+
+    return results
+
+async def augment_numbers_block(text: str) -> str:
     """
-    Checks saved numbers, takes first 5 (or all if ≤5), and prints the 'Restricted' list annotated.
+    Parse a block like:
+        🔒 Restricted: 5/254
+        1. 🔒 88801457239
+        ...
+    Append: ' — ✅ Free' or ' — ❌ connected to an account' (or ' — ⚠️ unknown') to each number line.
+    Safe for both plain and HTML parse_mode.
     """
-    uid = message.from_user.id
-    nums = _saved_numbers.get(uid, [])
-    if not nums:
-        return await message.reply("No numbers to check. Use /save first.")
+    if not text:
+        return text
+    lines = text.splitlines()
+    # Pull out candidate numbers per line
+    nums: List[str] = []
+    for ln in lines:
+        m = re.search(r'(\+?888\d{5,}|(?:\+?\d[\d\s\-]{6,}\d))', ln)
+        if m:
+            nums.append(m.group(1).replace(' ', '').replace('-', ''))
 
-    sample = nums[:5] if len(nums) > 5 else nums
-    _last_restricted_total[uid] = len(nums)
+    status = await check_numbers_connected(nums)
 
-    status_msg = await message.reply(f"Checking {len(sample)} numbers…")
-    statuses = await _bulk_check_connected(sample)
-    total = _last_restricted_total.get(uid, len(sample))
-    text = _fmt_list_with_status(sample, statuses, total)
-    await status_msg.edit_text(text)
+    def decorate(ln: str) -> str:
+        m = re.search(r'(\+?888\d{5,}|(?:\+?\d[\d\s\-]{6,}\d))', ln)
+        if not m:
+            return ln
+        raw = m.group(1).replace(' ', '').replace('-', '')
+        st = status.get(raw) or status.get(raw.lstrip('+')) or status.get('+' + raw)
+        if "✅ Free" in ln or "❌" in ln or "⚠️" in ln:
+            return ln  # avoid double-tagging
+        if st is True:
+            return ln + " — ❌ connected to an account"
+        elif st is False:
+            return ln + " — ✅ Free"
+        else:
+            return ln + " — ⚠️ unknown"
 
-@router.message(Command("restricted"))
-async def cmd_restricted(message: Message):
-    """
-    Paste your restricted numbers to annotate:
-    /restricted 88801457239 88802473528 88802692410 88803649531 88804365729
-    """
-    parts = (message.text or "").split()
-    given = [_canonical(p) for p in parts[1:] if p.strip()]
-    given = [g for g in given if g]
-    if not given:
-        return await message.reply("Usage: <code>/restricted <num1> <num2> ...</code>")
-
-    _last_restricted_total[message.from_user.id] = len(given)
-    status_msg = await message.reply(f"Annotating {len(given)} restricted numbers…")
-    statuses = await _bulk_check_connected(given)
-    text = _fmt_list_with_status(given, statuses, len(given))
-    await status_msg.edit_text(text)
-
-# ============================ BOOTSTRAP ============================
-
-bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-dp = Dispatcher()
-dp.include_router(router)
-
-if __name__ == "__main__":
-    init_fragment_api()
-    logger.info("Starting bot polling…")
-    dp.run_polling(bot, skip_updates=True, reset_webhook=True)
+    return "\n".join(decorate(ln) for ln in lines)
+# === End drop-in block ===
