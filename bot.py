@@ -6,14 +6,14 @@ import json
 import logging
 import asyncio
 import re
-from typing import Dict, List
+from typing import Dict, List, Tuple, Optional  # ← added Tuple, Optional
 
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import Message, InlineQuery, InlineQueryResultArticle, InputTextMessageContent  # ← added inline types
 
 from SafoneAPI import SafoneAPI
 
@@ -269,6 +269,119 @@ async def group_chatgpt_handler(message: Message):
     except Exception as e:
         logger.exception(f"group chatgpt error: {e}")
         await message.reply("Couldn't get a reply right now.")
+
+# ─── INLINE: Restricted-only scan (no collision with other inline) ────────────
+# Triggers: query starts with "chk", "res", or "restricted" (case-insensitive)
+# Usage: @YourBotName chk
+import aiohttp
+
+_DEFAULT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/115.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+_RESTRICT_PATTERNS = [
+    re.compile(r"\brestricted on Telegram\b", re.I),
+    re.compile(r"\bThis phone number is restricted\b", re.I),
+    re.compile(r"\bBlocked\b", re.I),
+]
+
+def _canonical_num(tok: str) -> str:
+    return re.sub(r"\D", "", (tok or ""))
+
+def _is_restricted_html(html_text: str) -> Optional[bool]:
+    if not html_text:
+        return None
+    for p in _RESTRICT_PATTERNS:
+        if p.search(html_text):
+            return True
+    return False  # reachable page without matches → not restricted
+
+async def _fetch_status_inline(
+    session: aiohttp.ClientSession,
+    num: str,
+    sem: asyncio.Semaphore,
+    timeout_total: float,
+) -> Tuple[str, Optional[bool]]:
+    url = f"https://fragment.com/phone/{num}"
+    try:
+        async with sem:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout_total)) as resp:
+                txt = await resp.text(errors="ignore")
+                return num, _is_restricted_html(txt)
+    except Exception as e:
+        logger.warning(f"[inline] fetch failed for {num}: {e!r}")
+        return num, None
+
+INLINE_TRIGGERS = {"chk", "res", "restricted"}
+
+@dp.inline_query(F.query.func(lambda q: bool(q) and (q.strip().split()[0].lower() in INLINE_TRIGGERS)))
+async def inline_restricted_scan(inline_q: InlineQuery):
+    """
+    Scans saved numbers (fragment._saves) and returns ONLY restricted ones.
+    Filtered by first token in query, so other inline handlers (e.g., fragment_url) won't collide.
+    """
+    uid = inline_q.from_user.id
+    nums = fragment._saves.get(uid, []) if hasattr(fragment, "_saves") else []
+
+    if not nums:
+        article = InlineQueryResultArticle(
+            id="no_saved",
+            title="📭 No saved numbers",
+            input_message_content=InputTextMessageContent(
+                "📭 No numbers saved. Use <code>/save</code> first.", parse_mode="HTML"
+            ),
+            description="Use /save to add numbers",
+        )
+        return await inline_q.answer([article], cache_time=0, is_personal=True)
+
+    # normalize, dedupe, sort
+    norm = sorted(set(_canonical_num(n) for n in nums if _canonical_num(n)))
+
+    # Inline should be fast
+    concurrency = min(len(norm), 50)
+    sem = asyncio.Semaphore(concurrency)
+    timeout_total = 5.0
+    conn = aiohttp.TCPConnector(limit_per_host=concurrency, ssl=False)
+
+    async with aiohttp.ClientSession(connector=conn, headers=_DEFAULT_HEADERS) as sess:
+        results = await asyncio.gather(
+            *(_fetch_status_inline(sess, n, sem, timeout_total) for n in norm),
+            return_exceptions=False,
+        )
+
+    restricted = [n for n, ok in results if ok is True]
+    unknown    = [n for n, ok in results if ok is None]
+
+    if restricted:
+        # keep body under inline message limits
+        body = "\n".join(
+            f"🔒 <a href='https://fragment.com/phone/{n}'>{n}</a>"
+            for n in restricted[:400]
+        )
+    else:
+        body = "✅ No restricted numbers found."
+
+    if unknown:
+        body += "\n\n⚠️ Could not verify (sample):\n" + "\n".join(unknown[:20])
+        if len(unknown) > 20:
+            body += f"\n…(+{len(unknown) - 20} more)"
+
+    title = f"🔍 Restricted: {len(restricted)} | ⚠️ Unknown: {len(unknown)}"
+
+    article = InlineQueryResultArticle(
+        id="restricted_only",
+        title=title,
+        input_message_content=InputTextMessageContent(body, parse_mode="HTML"),
+        description="Show only restricted numbers (and unknown if any)",
+    )
+    # cache_time=0 + is_personal → fresh, per-user
+    await inline_q.answer([article], cache_time=0, is_personal=True)
 
 # ─── STARTUP ───────────────────────────────────────────────────────
 @dp.startup()
