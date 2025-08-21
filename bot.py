@@ -5,20 +5,13 @@ import html
 import json
 import logging
 import asyncio
-import subprocess
 
 from dotenv import load_dotenv
-from aiogram import Bot, Dispatcher, types, F
+from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command
-from aiogram.types import (
-    Message,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-    CallbackQuery,
-    FSInputFile,
-)
+from aiogram.types import Message
 
 from SafoneAPI import SafoneAPI
 
@@ -28,17 +21,17 @@ chatgpt_enabled: dict[int, bool] = {}
 
 # ─── LOAD ENV & CONFIG ────────────────────────────────────────────
 load_dotenv()
-BOT_TOKEN             = os.getenv("BOT_TOKEN") or ""
+BOT_TOKEN       = os.getenv("BOT_TOKEN") or ""
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set in .env")
 
-SCREEN_SESSION        = os.getenv("SCREEN_SESSION", "meow")  # kept for compatibility with other plugins
-ADMIN_CHAT_ID         = int(os.getenv("ADMIN_CHAT_ID", "0"))
-PROJECT_PATH          = os.getenv("PROJECT_PATH", os.getcwd())
+SCREEN_SESSION  = os.getenv("SCREEN_SESSION", "meow")   # kept for compatibility with other plugins
+ADMIN_CHAT_ID   = int(os.getenv("ADMIN_CHAT_ID", "0"))
+PROJECT_PATH    = os.getenv("PROJECT_PATH", os.getcwd())
 
 # Memory settings
-MEMORY_FILE           = os.getenv("MEMORY_FILE", "memory.json")
-MAX_MEMORY            = int(os.getenv("MAX_MEMORY", "20"))  # messages kept per chat
+MEMORY_FILE     = os.getenv("MEMORY_FILE", "memory.json")
+MAX_MEMORY      = int(os.getenv("MAX_MEMORY", "20"))  # messages kept per chat
 
 # ─── LOGGING ──────────────────────────────────────────────────────
 logging.basicConfig(
@@ -84,7 +77,7 @@ def _save_memory():
 def _append_memory(chat_id: int, role: str, content: str):
     key = str(chat_id)
     _memory.setdefault(key, [])
-    _memory[key].append({"role": role, "content": content.strip()})
+    _memory[key].append({"role": role, "content": (content or "").strip()})
     # trim
     if len(_memory[key]) > MAX_MEMORY:
         _memory[key] = _memory[key][-MAX_MEMORY:]
@@ -95,22 +88,26 @@ def _build_context(chat_id: int, user_text: str) -> str:
     msgs = _memory.get(str(chat_id), [])[-(MAX_MEMORY - 1):]
     ctx_lines = []
     for m in msgs:
-        r = m.get("role","user")
-        c = m.get("content","").replace("\n", " ").strip()
+        r = m.get("role", "user")
+        c = (m.get("content", "") or "").replace("\n", " ").strip()
         if not c:
             continue
         ctx_lines.append(f"{r.title()}: {c}")
     ctx = "\n".join(ctx_lines)
+
     guidelines = (
         "Guidelines: Reply briefly, be friendly, and sprinkle a few relevant emojis naturally. "
         "If the user asks for code or commands, give them clean and minimal. Avoid markdown headings like '##'; "
         "prefer clear lines with emojis instead."
     )
-    prompt = f"{('Previous conversation:\\n' + ctx + '\\n\\n') if ctx else ''}User: {user_text}\n\n{guidelines}"
+
+    prefix = f"Previous conversation:\n{ctx}\n\n" if ctx else ""
+    prompt = f"{prefix}User: {user_text}\n\n{guidelines}"
     return prompt
 
 def _emojify(text: str) -> str:
     """Make responses feel more lively with emojis and convert '##' style headers to emoji bullets."""
+    text = text or ""
     lines = text.splitlines()
     out = []
     for ln in lines:
@@ -201,14 +198,15 @@ def _strip_bot_mention(text: str) -> str:
 
 @dp.message(F.text & ((F.chat.type == "group") | (F.chat.type == "supergroup")))
 async def group_chatgpt_handler(message: Message):
+    # Lightly remember group chat to build context, even if not directly addressed.
+    txt = (message.text or "").strip()
+    if txt and len(txt) <= 200:
+        _append_memory(message.chat.id, "user", f"[group context] {txt}")
+
     if not _is_addressed_to_bot(message):
-        # still remember the chat lightly (as user context), but only short messages to avoid noise
-        txt = (message.text or "").strip()
-        if txt and len(txt) <= 200:
-            _append_memory(message.chat.id, "user", f"[group context] {txt}")
         return
 
-    text = _strip_bot_mention(message.text or "")
+    text = _strip_bot_mention(txt)
     if not text:
         return
 
