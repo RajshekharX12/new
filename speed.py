@@ -8,14 +8,12 @@ import asyncio
 
 from aiogram.filters import Command
 from aiogram.types import Message
-from SafoneAPI import SafoneAPI
 
 # grab dispatcher & bot from main
 _main = sys.modules.get("__main__")
 dp = getattr(_main, 'dp', None)
 
 logger = logging.getLogger(__name__)
-api = SafoneAPI()
 
 async def run_in_executor(fn, *args, **kwargs):
     loop = asyncio.get_running_loop()
@@ -41,28 +39,26 @@ async def send_speed(message: Message):
         ping = data.get("ping", 0)
 
         text = (
-            "📶 **VPS Speed Test**\n"
-            f"• Download: **{download:.2f} Mbps**\n"
-            f"• Upload:   **{upload:.2f} Mbps**\n"
-            f"• Ping:     **{ping:.2f} ms**"
+            "📶 <b>VPS Speed Test</b>\n"
+            f"• Download: <b>{download:.2f} Mbps</b>\n"
+            f"• Upload:   <b>{upload:.2f} Mbps</b>\n"
+            f"• Ping:     <b>{ping:.2f} ms</b>"
         )
-        await status.edit_text(text, parse_mode="Markdown")
+        await status.edit_text(text, parse_mode="HTML")
 
     except asyncio.TimeoutError:
         await status.edit_text("❌ Speed test timed out. Please try again later.")
     except FileNotFoundError:
         await status.edit_text(
-            "⚠️ `speedtest-cli` not found. Install with:\n`pip install speedtest-cli`"
+            "⚠️ <code>speedtest-cli</code> not found. Install with:\n<code>pip install speedtest-cli</code>",
+            parse_mode="HTML"
         )
     except subprocess.CalledProcessError as e:
         logger.exception("speedtest-cli failed")
         safe = html.escape(e.output or str(e))
         await status.edit_text(
-            f"""⚠️ speedtest-cli error:
-```
-{safe}
-```""",
-            parse_mode="Markdown"
+            f"<b>⚠️ speedtest-cli error:</b>\n<pre>{safe}</pre>",
+            parse_mode="HTML"
         )
     except Exception as e:
         logger.exception("Unexpected speedtest error")
@@ -70,12 +66,12 @@ async def send_speed(message: Message):
 
 @dp.message(Command("exec"))
 async def exec_handler(message: Message):
-    """Run a shell command on the VPS and return a short bullet summary."""
+    """Run a shell command on the VPS and return raw output."""
     status = await message.reply("⏳ Running command…")
     parts = message.text.strip().split(maxsplit=1)
     if len(parts) < 2:
         return await status.edit_text(
-            "⚠️ Usage: `/exec <shell command>`", parse_mode="Markdown"
+            "⚠️ Usage: <code>/exec &lt;shell command&gt;</code>", parse_mode="HTML"
         )
     cmd = parts[1]
 
@@ -89,19 +85,16 @@ async def exec_handler(message: Message):
         )
     except subprocess.CalledProcessError as e:
         out = e.output or str(e)
+    except Exception as e:
+        out = f"(failed to run command: {e})"
 
-    # Always summarize output via ChatGPT
-    prompt = f"""Here is the output of the command `{cmd}`:
-```
-{out}
-```
-Provide a concise bullet-point summary (one line each) highlighting major steps or completion messages.
-"""
-    try:
-        resp = await api.chatgpt(prompt)
-        summary = getattr(resp, "message", str(resp)).strip()
-        await status.edit_text(f"📄 Summary:\n{summary}")
-    except Exception:
-        # Fallback: send raw output
-        safe_out = html.escape(out)
-        await status.edit_text(f"```\n{safe_out}\n```", parse_mode="Markdown")
+    if not out.strip():
+        out = "(no output)"
+
+    # Telegram message length safety
+    safe_out = html.escape(out)
+    MAX = 3500  # leave headroom for markup
+    if len(safe_out) > MAX:
+        safe_out = safe_out[:MAX] + "\n…(truncated)"
+
+    await status.edit_text(f"📄 <b>Output:</b>\n<pre>{safe_out}</pre>", parse_mode="HTML")
